@@ -10,6 +10,8 @@ export type SessionClaims = {
   role: "customer" | "admin";
   email: string;
   name: string;
+  /** Admins with elevated rights (create admins, delete bookings). */
+  superAdmin?: boolean;
 };
 
 function toSeconds(maxAge: string): number {
@@ -49,6 +51,7 @@ export async function verifySession(token: string): Promise<SessionClaims | null
         role: payload.role,
         email: payload.email,
         name: typeof payload.name === "string" ? payload.name : "",
+        superAdmin: payload.superAdmin === true,
       };
     }
     return null;

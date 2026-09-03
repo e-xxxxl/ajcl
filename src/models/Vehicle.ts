@@ -16,6 +16,13 @@ const vehicleSchema = new Schema(
     /** Used to estimate ETA when the Routes API is unavailable. */
     averageSpeedKmh: { type: Number, required: true, min: 1, default: 24 },
 
+    /**
+     * How many units of this class the operator runs. A class is unavailable
+     * for new bookings once this many are already on active deliveries.
+     * 0 = unlimited (no capacity cap).
+     */
+    fleetSize: { type: Number, required: true, min: 0, default: 0 },
+
     active: { type: Boolean, default: true, index: true },
     sortOrder: { type: Number, default: 0 },
   },

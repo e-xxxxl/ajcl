@@ -15,6 +15,8 @@ export type VehicleSeed = {
   minimumFare: number;
   capacity: string;
   averageSpeedKmh: number;
+  /** Units the operator runs. 0 = unlimited. Admin-editable. */
+  fleetSize: number;
   active: boolean;
   sortOrder: number;
 };
@@ -31,6 +33,7 @@ export const VEHICLE_SEEDS: VehicleSeed[] = [
     minimumFare: 0,
     capacity: "Up to 20 kg · small parcels",
     averageSpeedKmh: 22,
+    fleetSize: 0,
     active: true,
     sortOrder: 1,
   },
@@ -45,6 +48,7 @@ export const VEHICLE_SEEDS: VehicleSeed[] = [
     minimumFare: 0,
     capacity: "Up to 500 kg · multiple boxes",
     averageSpeedKmh: 28,
+    fleetSize: 0,
     active: true,
     sortOrder: 2,
   },
@@ -59,6 +63,7 @@ export const VEHICLE_SEEDS: VehicleSeed[] = [
     minimumFare: 0,
     capacity: "Up to 1,500 kg · furniture & appliances",
     averageSpeedKmh: 26,
+    fleetSize: 0,
     active: true,
     sortOrder: 3,
   },

@@ -57,6 +57,14 @@ export function requireAdmin(req: Request): SessionClaims {
   return session;
 }
 
+export function requireSuperAdmin(req: Request): SessionClaims {
+  const session = requireAdmin(req);
+  if (!session.superAdmin) {
+    throw new ForbiddenError("This action requires a super-admin account.");
+  }
+  return session;
+}
+
 /**
  * Load the full user record for the current session. Falls back to the session
  * claims when the DB is unreachable so the UI still renders.
@@ -76,6 +84,7 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
       email: user.email,
       phone: user.phone,
       role: user.role as "customer" | "admin",
+      superAdmin: Boolean((user as { superAdmin?: boolean }).superAdmin),
     };
   } catch {
     const [firstName, ...rest] = session.name.split(" ");
@@ -87,6 +96,7 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
       email: session.email,
       phone: "",
       role: session.role,
+      superAdmin: Boolean(session.superAdmin),
     };
   }
 }

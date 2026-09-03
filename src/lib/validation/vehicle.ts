@@ -17,6 +17,7 @@ export const vehicleUpsertSchema = z.object({
   basePrice: z.coerce.number().min(0).max(10_000_000).default(0),
   minimumFare: z.coerce.number().min(0).max(10_000_000).default(0),
   averageSpeedKmh: z.coerce.number().min(1).max(200).default(24),
+  fleetSize: z.coerce.number().int().min(0).max(999).default(0),
   active: z.boolean().default(true),
   sortOrder: z.coerce.number().int().min(0).max(999).default(0),
 });
@@ -43,6 +44,7 @@ export const vehiclePatchSchema = z.object({
   basePrice: z.coerce.number().min(0).max(10_000_000).optional(),
   minimumFare: z.coerce.number().min(0).max(10_000_000).optional(),
   averageSpeedKmh: z.coerce.number().min(1).max(200).optional(),
+  fleetSize: z.coerce.number().int().min(0).max(999).optional(),
   active: z.boolean().optional(),
   sortOrder: z.coerce.number().int().min(0).max(999).optional(),
 });

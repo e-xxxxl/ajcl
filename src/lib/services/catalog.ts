@@ -35,6 +35,7 @@ function seedFallback(): VehicleDTO[] {
     basePrice: v.basePrice,
     minimumFare: v.minimumFare,
     averageSpeedKmh: v.averageSpeedKmh,
+    fleetSize: v.fleetSize ?? 0,
     active: v.active,
     sortOrder: v.sortOrder ?? i,
   }));

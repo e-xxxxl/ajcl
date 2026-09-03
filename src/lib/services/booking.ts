@@ -7,6 +7,7 @@ import { ApiError } from "../api";
 import { generateBookingReference } from "../utils";
 import { calculatePrice } from "../pricing/engine";
 import { computeRouteMetrics } from "./quote";
+import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
 import { BOOKING_STATUS_FLOW, type BookingStatus } from "../../config/booking";
 import type { CreateBookingInput } from "../validation/booking";
@@ -53,6 +54,13 @@ export async function createBooking(
 
   const vehicle = await Vehicle.findOne({ slug: input.vehicleSlug, active: true });
   if (!vehicle) throw new ApiError("The selected vehicle is not available.", 422);
+
+  if (await isClassSoldOut(vehicle.slug, vehicle.fleetSize)) {
+    throw new ApiError(
+      `All ${vehicle.name.toLowerCase()}s are currently out on deliveries. Please pick another vehicle or try again shortly.`,
+      409,
+    );
+  }
 
   const metrics = await computeRouteMetrics(input, { clientRoute: input.clientRoute });
   if (metrics.distanceKm <= 0) {
@@ -152,7 +160,7 @@ export async function changeBookingStatus(params: {
   note?: string;
   actorRole: "admin" | "system" | "customer";
   actorId?: string;
-  driver?: { name?: string; phone?: string };
+  driver?: { name?: string; phone?: string; plate?: string };
   force?: boolean;
 }): Promise<BookingHydrated> {
   await connectToDatabase();
@@ -177,8 +185,12 @@ export async function changeBookingStatus(params: {
     at: now,
   });
 
-  if (params.driver && (params.driver.name || params.driver.phone)) {
-    booking.assignedDriver = { name: params.driver.name, phone: params.driver.phone };
+  if (params.driver && (params.driver.name || params.driver.phone || params.driver.plate)) {
+    booking.assignedDriver = {
+      name: params.driver.name,
+      phone: params.driver.phone,
+      plate: params.driver.plate,
+    };
   }
   if (to === "confirmed" && !booking.confirmedAt) booking.confirmedAt = now;
   if (to === "delivered") booking.deliveredAt = now;

@@ -24,7 +24,13 @@ import { passwordResetEmail, welcomeEmail } from "../lib/email/templates";
 export const authRouter = Router();
 
 function issueToken(
-  claims: { sub: string; role: "customer" | "admin"; email: string; name: string },
+  claims: {
+    sub: string;
+    role: "customer" | "admin";
+    email: string;
+    name: string;
+    superAdmin?: boolean;
+  },
   remember: boolean,
 ) {
   return signSession(claims, remember ? SESSION_MAX_AGE_SECONDS : SHORT_SESSION_MAX_AGE_SECONDS);
@@ -110,12 +116,14 @@ authRouter.post(
     user.lastLoginAt = new Date();
     await user.save();
 
+    const superAdmin = Boolean(user.superAdmin);
     const token = await issueToken(
       {
         sub: String(user._id),
         role: user.role as "customer" | "admin",
         email: user.email,
         name: `${user.firstName} ${user.lastName}`.trim(),
+        superAdmin,
       },
       input.remember,
     );
@@ -130,6 +138,7 @@ authRouter.post(
         email: user.email,
         phone: user.phone,
         role: user.role as "customer" | "admin",
+        superAdmin,
       },
     });
   }),

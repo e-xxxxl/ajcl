@@ -32,6 +32,7 @@ export async function ensureBootstrapped(): Promise<void> {
           basePrice: v.basePrice,
           minimumFare: v.minimumFare,
           averageSpeedKmh: v.averageSpeedKmh,
+          fleetSize: v.fleetSize,
           active: v.active,
           sortOrder: v.sortOrder,
         })),
@@ -64,10 +65,18 @@ export async function ensureBootstrapped(): Promise<void> {
           phone: "0000000000",
           passwordHash: await hashPassword(env.adminPassword),
           role: "admin",
+          superAdmin: true,
         });
-        console.info(`[bootstrap] created admin account for ${env.adminEmail}`);
-      } else if (existing.role !== "admin") {
-        await User.updateOne({ _id: existing._id }, { $set: { role: "admin" } });
+        console.info(`[bootstrap] created super-admin account for ${env.adminEmail}`);
+      } else if (
+        existing.role !== "admin" ||
+        !(existing as { superAdmin?: boolean }).superAdmin
+      ) {
+        // The bootstrap account is always the super-admin.
+        await User.updateOne(
+          { _id: existing._id },
+          { $set: { role: "admin", superAdmin: true } },
+        );
       }
     }
 

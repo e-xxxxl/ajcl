@@ -20,6 +20,7 @@ export function serializeVehicle(v: Lean<VehicleDoc>): VehicleDTO {
     basePrice: v.basePrice,
     minimumFare: v.minimumFare,
     averageSpeedKmh: v.averageSpeedKmh,
+    fleetSize: v.fleetSize ?? 0,
     active: v.active,
     sortOrder: v.sortOrder ?? 0,
   };
@@ -102,9 +103,14 @@ export function serializeBooking(
       channel: b.payment?.channel ?? undefined,
       paidAt: iso(b.payment?.paidAt),
     },
-    assignedDriver: b.assignedDriver?.name
-      ? { name: b.assignedDriver.name ?? undefined, phone: b.assignedDriver.phone ?? undefined }
-      : undefined,
+    assignedDriver:
+      b.assignedDriver && (b.assignedDriver.name || b.assignedDriver.phone || b.assignedDriver.plate)
+        ? {
+            name: b.assignedDriver.name ?? undefined,
+            phone: b.assignedDriver.phone ?? undefined,
+            plate: b.assignedDriver.plate ?? undefined,
+          }
+        : undefined,
     statusHistory: (b.statusHistory ?? []).map((s) => ({
       status: s.status as BookingDTO["status"],
       note: s.note ?? undefined,

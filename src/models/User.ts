@@ -16,6 +16,8 @@ const userSchema = new Schema(
     /** bcrypt hash — never selected by default. */
     passwordHash: { type: String, required: true, select: false },
     role: { type: String, enum: ["customer", "admin"], default: "customer", index: true },
+    /** Elevated admin — can create other admins and delete bookings. */
+    superAdmin: { type: Boolean, default: false },
     /** Password reset flow. */
     resetTokenHash: { type: String, select: false },
     resetTokenExpiresAt: { type: Date, select: false },

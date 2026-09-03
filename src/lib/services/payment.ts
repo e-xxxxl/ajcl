@@ -8,6 +8,7 @@ import { env } from "../env";
 import { calculatePrice, toMinorUnits } from "../pricing/engine";
 import { computeRouteMetrics, bookingToRouteInput } from "./quote";
 import { changeBookingStatus } from "./booking";
+import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
 import {
   initializeTransaction,
@@ -81,6 +82,23 @@ export async function initializeBookingPayment(
   }
   if (booking.status === "cancelled") {
     throw new ApiError("This booking was cancelled.", 409);
+  }
+
+  // Don't take payment for a class that filled up since the booking was created.
+  const vehicleDoc = booking.vehicle?.vehicleId
+    ? await Vehicle.findById(booking.vehicle.vehicleId).lean()
+    : null;
+  if (
+    vehicleDoc &&
+    booking.vehicle &&
+    (await isClassSoldOut(booking.vehicle.slug, vehicleDoc.fleetSize, {
+      excludeBookingId: String(booking._id),
+    }))
+  ) {
+    throw new ApiError(
+      `All ${booking.vehicle.name.toLowerCase()}s are currently booked. Please try again shortly, or contact support to switch vehicles.`,
+      409,
+    );
   }
 
   // Authoritative re-price before charging.

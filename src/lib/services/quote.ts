@@ -4,6 +4,7 @@ import { computeRoute, haversineKm, type LatLng } from "../maps/service";
 import { calculatePrice, type PricingRouteMetrics } from "../pricing/engine";
 import { serializeVehicle } from "../serialize";
 import { ApiError } from "../api";
+import { activeUnitsBySlug, unitsAvailable } from "./fleet";
 import type { RouteInput, ClientRouteInput } from "../validation/booking";
 import type { QuoteDTO } from "../../types";
 import { FALLBACK_AVERAGE_SPEED_KMH } from "../../config/maps";
@@ -198,6 +199,8 @@ export async function buildQuote(
     estimatedDurationSeconds: metrics.estimatedDurationSeconds,
   };
 
+  const inUseBySlug = await activeUnitsBySlug();
+
   return {
     distanceKm: metrics.distanceKm,
     returnLegKm: metrics.returnLegKm,
@@ -210,6 +213,7 @@ export async function buildQuote(
         metrics.source === "google"
           ? base
           : Math.round((metrics.distanceKm / v.averageSpeedKmh) * 3600);
+      const avail = unitsAvailable(v.fleetSize, inUseBySlug.get(v.slug) ?? 0);
       return {
         vehicle: serializeVehicle(v),
         price: calculatePrice(
@@ -222,6 +226,8 @@ export async function buildQuote(
           },
           { ...priceMetrics, estimatedDurationSeconds: scaled },
         ),
+        unitsAvailable: avail,
+        soldOut: avail === 0,
       };
     }),
   };

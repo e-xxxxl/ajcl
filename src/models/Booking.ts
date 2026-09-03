@@ -164,6 +164,7 @@ const bookingSchema = new Schema(
     assignedDriver: {
       name: { type: String, trim: true },
       phone: { type: String, trim: true },
+      plate: { type: String, trim: true, uppercase: true, maxlength: 20 },
     },
 
     cancelledReason: { type: String, trim: true, maxlength: 500 },

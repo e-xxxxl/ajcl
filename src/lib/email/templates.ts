@@ -40,7 +40,10 @@ export function renderEmail(input: LayoutInput): { html: string; text: string } 
   const paragraphsHtml = input.paragraphs
     .map(
       (p) =>
-        `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:${INK};">${esc(p)}</p>`,
+        `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:${INK};">${esc(p).replace(
+          /\n/g,
+          "<br>",
+        )}</p>`,
     )
     .join("");
 
@@ -126,9 +129,13 @@ type EventContent = {
   cta?: { label: string; href: string };
 };
 
-const EVENTS: Partial<
-  Record<NotificationType, (ctx: { ref: string; name: string }) => EventContent>
-> = {
+type EventCtx = {
+  ref: string;
+  name: string;
+  driver?: { name?: string; phone?: string; plate?: string };
+};
+
+const EVENTS: Partial<Record<NotificationType, (ctx: EventCtx) => EventContent>> = {
   booking_created: ({ ref }) => ({
     subject: `Complete payment for booking ${ref}`,
     heading: "Your booking has been created",
@@ -162,12 +169,23 @@ const EVENTS: Partial<
     paragraphs: [`Booking ${ref} is confirmed. We'll assign a rider and keep you updated.`],
     cta: { label: "View booking", href: `/dashboard/bookings/${ref}` },
   }),
-  driver_assigned: ({ ref }) => ({
-    subject: `A rider is on the way for booking ${ref}`,
-    heading: "Rider assigned",
-    paragraphs: [`A rider has been assigned to booking ${ref} and is heading to pickup.`],
-    cta: { label: "Track your rider", href: `/dashboard/bookings/${ref}` },
-  }),
+  driver_assigned: ({ ref, driver }) => {
+    const bits = [
+      driver?.name ? `Rider: ${driver.name}` : "",
+      driver?.phone ? `Phone: ${driver.phone}` : "",
+      driver?.plate ? `Plate number: ${driver.plate}` : "",
+    ].filter(Boolean);
+    return {
+      subject: `A rider is on the way for booking ${ref}`,
+      heading: "Rider assigned",
+      paragraphs: [
+        `A rider has been assigned to booking ${ref} and is heading to pickup.`,
+        ...(bits.length ? [bits.join("\n")] : []),
+        "You can call the rider or check the plate number on arrival.",
+      ],
+      cta: { label: "Track your rider", href: `/dashboard/bookings/${ref}` },
+    };
+  },
   in_transit: ({ ref }) => ({
     subject: `Your package for ${ref} is on the way`,
     heading: "Package in transit",
@@ -205,6 +223,7 @@ export function emailForEvent(params: {
   type: NotificationType;
   bookingReference?: string;
   recipientName?: string;
+  driver?: { name?: string; phone?: string; plate?: string };
   /** Fallbacks if the event isn't specially templated. */
   title: string;
   body: string;
@@ -214,7 +233,7 @@ export function emailForEvent(params: {
   const build = EVENTS[params.type];
 
   const content: EventContent = build
-    ? build({ ref, name: params.recipientName ?? "" })
+    ? build({ ref, name: params.recipientName ?? "", driver: params.driver })
     : {
         subject: params.title,
         heading: params.title,

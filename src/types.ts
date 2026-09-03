@@ -10,6 +10,7 @@ export type SessionUser = {
   email: string;
   phone: string;
   role: "customer" | "admin";
+  superAdmin?: boolean;
 };
 
 export type VehicleDTO = {
@@ -23,6 +24,8 @@ export type VehicleDTO = {
   basePrice: number;
   minimumFare: number;
   averageSpeedKmh: number;
+  /** Units the operator runs. 0 = unlimited. */
+  fleetSize: number;
   active: boolean;
   sortOrder: number;
 };
@@ -60,6 +63,10 @@ export type QuoteDTO = {
   vehicles: Array<{
     vehicle: VehicleDTO;
     price: PriceBreakdownDTO;
+    /** Units still free for booking. `null` = unlimited (no fleet cap set). */
+    unitsAvailable: number | null;
+    /** True when every unit of this class is on an active delivery. */
+    soldOut: boolean;
   }>;
 };
 
@@ -109,7 +116,7 @@ export type BookingDTO = {
     channel?: string;
     paidAt?: string;
   };
-  assignedDriver?: { name?: string; phone?: string };
+  assignedDriver?: { name?: string; phone?: string; plate?: string };
   statusHistory: BookingStatusEntryDTO[];
   createdAt: string;
   updatedAt: string;

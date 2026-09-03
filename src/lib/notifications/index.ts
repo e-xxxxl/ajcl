@@ -30,6 +30,8 @@ export type NotificationPayload = {
   href?: string;
   bookingId?: string;
   bookingReference?: string;
+  /** Rider details, for the "rider assigned" email. */
+  driver?: { name?: string; phone?: string; plate?: string };
   /** Contact hints for other channels. */
   email?: string;
   phone?: string;
@@ -93,6 +95,7 @@ registerChannelDriver({
       type: payload.type,
       bookingReference: payload.bookingReference,
       recipientName: firstName,
+      driver: payload.driver,
       title: payload.title,
       body: payload.body,
       href: payload.href,
@@ -103,7 +106,10 @@ registerChannelDriver({
 
 /* ── Templates ──────────────────────────────────────────────────────────── */
 
-type BookingLike = Pick<BookingDoc, "bookingReference"> & { _id: unknown };
+type BookingLike = Pick<BookingDoc, "bookingReference"> & {
+  _id: unknown;
+  assignedDriver?: { name?: string | null; phone?: string | null; plate?: string | null } | null;
+};
 
 function bookingHref(ref: string) {
   return `/dashboard/bookings/${ref}`;
@@ -174,6 +180,7 @@ export const notify = {
     };
     const t = map[status];
     if (!t) return;
+    const d = booking.assignedDriver;
     return dispatch({
       userId,
       type: t.type,
@@ -182,6 +189,14 @@ export const notify = {
       href: bookingHref(booking.bookingReference),
       bookingId: String(booking._id),
       bookingReference: booking.bookingReference,
+      driver:
+        status === "driver_assigned" && d
+          ? {
+              name: d.name ?? undefined,
+              phone: d.phone ?? undefined,
+              plate: d.plate ?? undefined,
+            }
+          : undefined,
     });
   },
   async adminNewBooking(adminUserId: string, booking: BookingLike) {
