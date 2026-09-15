@@ -70,7 +70,7 @@ export async function repriceBooking(booking: BookingHydrated): Promise<BookingH
 export async function initializeBookingPayment(
   userId: string,
   reference: string,
-): Promise<{ authorizationUrl: string; reference: string; amount: number; mock: boolean }> {
+): Promise<{ authorizationUrl: string; reference: string; amount: number }> {
   await connectToDatabase();
 
   const booking = await Booking.findOne({ bookingReference: reference.toUpperCase() });
@@ -112,35 +112,12 @@ export async function initializeBookingPayment(
   const user = await User.findById(userId).lean();
   if (!user) throw new ApiError("Account not found.", 404);
 
+  if (!env.paystackSecretKey) {
+    throw new ApiError("Payments are not configured. Please contact support.", 503);
+  }
+
   const txReference = `${booking.bookingReference}-${Date.now().toString(36).toUpperCase()}`;
   const amountMinor = toMinorUnits(amount);
-
-  // ── Dev fallback: no Paystack keys → mock checkout page ──
-  if (!env.paystackSecretKey) {
-    booking.payment.provider = "paystack";
-    booking.payment.status = "pending";
-    booking.payment.reference = txReference;
-    booking.payment.amount = amount;
-    booking.payment.currency = booking.pricing.currency;
-    await booking.save();
-
-    await Payment.create({
-      booking: booking._id,
-      user: userId,
-      reference: txReference,
-      amount,
-      amountMinor,
-      currency: booking.pricing.currency,
-      status: "pending",
-    });
-
-    return {
-      authorizationUrl: `${env.frontendUrl}/book/mock-pay?reference=${txReference}`,
-      reference: txReference,
-      amount,
-      mock: true,
-    };
-  }
 
   const init = await initializeTransaction({
     email: user.email,
@@ -186,7 +163,6 @@ export async function initializeBookingPayment(
     authorizationUrl: init.authorizationUrl,
     reference: init.reference,
     amount,
-    mock: false,
   };
 }
 
@@ -277,53 +253,15 @@ async function notifyAdmins(booking: BookingHydrated) {
   }
 }
 
-/** Verify with Paystack (or mock) and reconcile. Used by the callback route. */
+/** Verify with Paystack and reconcile. Used by the callback route. */
 export async function verifyAndReconcile(
   reference: string,
   via: "callback" | "webhook" = "callback",
 ): Promise<ReconcileOutcome> {
   if (!env.paystackSecretKey) {
-    const ledger = await Payment.findOne({ reference });
-    if (!ledger) throw new ApiError("Unknown payment reference.", 404);
-    return reconcilePayment(
-      {
-        status: ledger.status === "success" ? "success" : "pending",
-        reference,
-        amountMinor: ledger.amountMinor,
-        currency: ledger.currency,
-        raw: { mock: true },
-      },
-      via,
-    );
+    throw new ApiError("Payments are not configured. Please contact support.", 503);
   }
 
   const verification = await verifyTransaction(reference);
   return reconcilePayment(verification, via);
-}
-
-/** Dev-only: confirm a mock payment (no Paystack keys configured). */
-export async function confirmMockPayment(
-  userId: string,
-  reference: string,
-  outcome: "success" | "fail",
-): Promise<ReconcileOutcome> {
-  if (env.paystackSecretKey) throw new ApiError("Mock payments are disabled.", 400);
-  await connectToDatabase();
-
-  const ledger = await Payment.findOne({ reference });
-  if (!ledger || String(ledger.user) !== userId) throw new ApiError("Unknown payment reference.", 404);
-
-  return reconcilePayment(
-    {
-      status: outcome === "success" ? "success" : "failed",
-      reference,
-      amountMinor: ledger.amountMinor,
-      currency: ledger.currency,
-      channel: "mock",
-      paidAt: new Date().toISOString(),
-      gatewayResponse: outcome === "success" ? "Approved (mock)" : "Declined (mock)",
-      raw: { mock: true, outcome },
-    },
-    "callback",
-  );
 }

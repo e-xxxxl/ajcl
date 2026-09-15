@@ -17,7 +17,7 @@ healthRouter.get(
       app: "ok",
       frontendUrl: env.frontendUrl,
       mapsServer: isMapsServerConfigured ? "configured" : "not configured (browser-only)",
-      paystack: isPaystackConfigured ? "configured" : "not configured (mock checkout)",
+      paystack: isPaystackConfigured ? "configured" : "not configured",
       email: isEmailConfigured ? "configured (resend)" : "not configured",
     };
 

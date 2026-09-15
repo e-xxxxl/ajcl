@@ -181,8 +181,10 @@ authRouter.post(
 
       const { subject, html, text } = passwordResetEmail({ name: user.firstName, resetUrl });
       const sent = await sendEmail({ to: user.email, subject, html, text });
-      // In dev (or when email isn't configured) hand the link back so the flow is testable.
-      if (!sent || !env.isProd) devResetUrl = resetUrl;
+      if (!sent) console.error(`[auth] password reset email failed to send for ${email}`);
+      // Local/dev only: hand the link back so the flow is testable without email.
+      // Never leaked in production, even if sending failed — the token stays server-side.
+      if (!env.isProd) devResetUrl = resetUrl;
     }
 
     return ok(res, {

@@ -6,22 +6,13 @@ import { enforceRateLimit } from "../lib/rate-limit";
 import { connectToDatabase } from "../lib/db";
 import { Payment } from "../models/Payment";
 import { serializeBooking } from "../lib/serialize";
-import { env, isPaystackConfigured } from "../lib/env";
+import { env } from "../lib/env";
 import { verifyWebhookSignature, verifyTransaction } from "../lib/paystack";
-import {
-  initializeBookingPayment,
-  verifyAndReconcile,
-  confirmMockPayment,
-  reconcilePayment,
-} from "../lib/services/payment";
+import { initializeBookingPayment, verifyAndReconcile, reconcilePayment } from "../lib/services/payment";
 
 export const paymentsRouter = Router();
 
 const initSchema = z.object({ bookingReference: z.string().trim().min(4).max(40) });
-const mockSchema = z.object({
-  reference: z.string().trim().min(4).max(60),
-  outcome: z.enum(["success", "fail"]),
-});
 
 /** POST /api/payments/initialize */
 paymentsRouter.post(
@@ -33,7 +24,7 @@ paymentsRouter.post(
     const { bookingReference } = parse(initSchema, req.body);
     const result = await initializeBookingPayment(session.sub, bookingReference);
 
-    return ok(res, { ...result, provider: isPaystackConfigured ? "paystack" : "mock" });
+    return ok(res, { ...result, provider: "paystack" });
   }),
 );
 
@@ -58,24 +49,6 @@ paymentsRouter.get(
       paid: outcome.paid,
       status: outcome.status,
       booking: serializeBooking(outcome.booking.toObject()),
-    });
-  }),
-);
-
-/** POST /api/payments/mock-confirm — DEV ONLY (no Paystack keys configured). */
-paymentsRouter.post(
-  "/mock-confirm",
-  asyncHandler(async (req, res) => {
-    const session = requireSession(req);
-    if (isPaystackConfigured) throw new ApiError("Mock payments are disabled.", 400);
-
-    const { reference, outcome } = parse(mockSchema, req.body);
-    const result = await confirmMockPayment(session.sub, reference, outcome);
-
-    return ok(res, {
-      paid: result.paid,
-      status: result.status,
-      booking: serializeBooking(result.booking.toObject()),
     });
   }),
 );
