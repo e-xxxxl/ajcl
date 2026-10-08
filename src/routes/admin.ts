@@ -19,6 +19,7 @@ import { getAdminStats, listBookingsForAdmin } from "../lib/services/admin";
 import { changeBookingStatus } from "../lib/services/booking";
 import { activeUnitsBySlug } from "../lib/services/fleet";
 import { assignRiderToBooking, resetHandoverLock } from "../lib/services/rider";
+import { findBestRider, autoAssignPending } from "../lib/services/autoassign";
 import { vehicleUpsertSchema, vehiclePatchSchema } from "../lib/validation/vehicle";
 import { slugify } from "../lib/utils";
 import { BOOKING_STATUS_FLOW, type BookingStatus } from "../config/booking";
@@ -251,25 +252,39 @@ adminRouter.patch(
   }),
 );
 
-/** DELETE /api/admin/bookings/:reference/assign-rider — unassign, before pickup only. */
-adminRouter.delete(
-  "/bookings/:reference/assign-rider",
+/** POST /api/admin/bookings/:reference/auto-assign: run the automatic allocator now.
+ *  On a booking that already has a rider (before pickup) it picks a different one. */
+adminRouter.post(
+  "/bookings/:reference/auto-assign",
   asyncHandler(async (req, res) => {
-    requireAdmin(req);
+    const admin = requireAdmin(req);
     await connectToDatabase();
 
     const booking = await Booking.findOne({
       bookingReference: req.params.reference.toUpperCase(),
-    });
+    }).lean();
     if (!booking) throw new ApiError("Booking not found.", 404);
-    if (booking.handover?.pickupCodeUsedAt) {
-      throw new ApiError("The package has already been picked up — the rider can't be unassigned.", 409);
+    if (!["confirmed", "driver_assigned"].includes(booking.status)) {
+      throw new ApiError(`Cannot assign a rider to a ${booking.status} booking.`, 409);
     }
-    booking.set("assignedRider", undefined);
-    booking.set("assignedDriver", undefined);
-    await booking.save();
 
-    return ok(res, { booking: serializeBooking(booking.toObject(), { includeCustomer: false }) });
+    const rider = await findBestRider(booking, {
+      excludeRiderId: booking.assignedRider ? String(booking.assignedRider) : undefined,
+    });
+    if (!rider) {
+      throw new ApiError(
+        "No rider is available for this vehicle right now (riders must be active, fit the vehicle and be under their job limit).",
+        409,
+      );
+    }
+
+    const updated = await assignRiderToBooking({
+      bookingReference: booking.bookingReference,
+      riderId: String(rider._id),
+      actorId: admin.sub,
+      note: "Rider assigned automatically",
+    });
+    return ok(res, { booking: serializeBooking(updated.toObject(), { includeCustomer: false }) });
   }),
 );
 
@@ -591,6 +606,9 @@ adminRouter.post(
     });
     console.info(`[admin] ${me.email} created rider ${input.email}`);
 
+    // A new rider may be able to take bookings that were waiting for someone.
+    void autoAssignPending();
+
     return ok(res, { rider: await serializeRider(rider.toObject() as RiderLean) }, 201);
   }),
 );
@@ -618,6 +636,9 @@ adminRouter.patch(
       active: input.active !== undefined ? input.active : currentRider.active !== false,
     });
     await rider.save();
+
+    // A re-activated rider, or a changed vehicle type, may unlock waiting bookings.
+    if (input.active === true || input.vehicleType !== undefined) void autoAssignPending();
 
     return ok(res, { rider: await serializeRider(rider.toObject() as RiderLean) });
   }),

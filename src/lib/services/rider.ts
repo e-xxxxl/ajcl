@@ -5,6 +5,7 @@ import { ApiError } from "../api";
 import { changeBookingStatus } from "./booking";
 import { ensureHandoverCodes } from "./handover";
 import { sendRiderAssignedEmails } from "./booking-emails";
+import { autoAssignPending } from "./autoassign";
 import { notify, notifyAllAdmins } from "../notifications";
 
 const MAX_CODE_ATTEMPTS = 5;
@@ -43,6 +44,7 @@ export async function assignRiderToBooking(params: {
   const wasAlreadyAssigned = booking.status === "driver_assigned";
 
   booking.assignedRider = rider._id as unknown as BookingHydrated["assignedRider"];
+  booking.riderAssignedAt = new Date();
   booking.assignedDriver = {
     name: `${rider.firstName} ${rider.lastName}`.trim(),
     phone: rider.phone,
@@ -200,6 +202,9 @@ export async function confirmDelivery(params: {
     "admin_delivery_confirmed",
     `${updated.bookingReference} was delivered — delivery code verified by the rider.`,
   );
+
+  // This rider just freed up. Give them (or anyone free) the next waiting booking.
+  void autoAssignPending();
 
   return updated;
 }

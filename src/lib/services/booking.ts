@@ -228,6 +228,12 @@ export async function changeBookingStatus(params: {
   });
   if (to === "driver_assigned") await sendRiderAssignedEmails(booking._id);
 
+  // A cancelled job frees its rider. Let a waiting booking take their place.
+  // (Imported lazily: the auto-assign engine itself calls this function.)
+  if (to === "cancelled" && booking.assignedRider) {
+    void import("./autoassign").then((m) => m.autoAssignPending()).catch(() => undefined);
+  }
+
   return booking;
 }
 

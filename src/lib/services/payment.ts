@@ -12,6 +12,7 @@ import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
 import { ensureHandoverCodes } from "./handover";
 import { sendConfirmationEmails } from "./booking-emails";
+import { autoAssignBooking } from "./autoassign";
 import {
   initializeTransaction,
   verifyTransaction,
@@ -225,18 +226,25 @@ export async function reconcilePayment(
     await notify.paymentSucceeded(String(booking.user), booking);
 
     let finalBooking: BookingHydrated = booking;
-    if (booking.status === "pending") {
+    const justConfirmed = booking.status === "pending";
+    if (justConfirmed) {
       finalBooking = await changeBookingStatus({
         bookingId: String(booking._id),
         to: "confirmed",
         note: "Payment received",
         actorRole: "system",
       });
-      await notifyAdmins(finalBooking);
     }
 
     // Paid and confirmed: email the sender and receiver their codes (once only).
     await sendConfirmationEmails(finalBooking);
+
+    // Then allocate a rider automatically. The rider-assigned emails follow the
+    // confirmation emails, so the code always arrives first.
+    const assigned = await autoAssignBooking(String(finalBooking._id));
+    if (assigned) finalBooking = assigned;
+
+    if (justConfirmed) await notifyAdmins(finalBooking, assigned?.assignedDriver?.name ?? undefined);
 
     return { booking: finalBooking, paid: true, status: "paid" };
   }
@@ -250,10 +258,12 @@ export async function reconcilePayment(
   return { booking, paid: false, status: booking.payment.status };
 }
 
-async function notifyAdmins(booking: BookingHydrated) {
+async function notifyAdmins(booking: BookingHydrated, autoAssignedTo?: string) {
   try {
     const admins = await User.find({ role: "admin" }).select("_id").lean();
-    await Promise.all(admins.map((a) => notify.adminNewBooking(String(a._id), booking)));
+    await Promise.all(
+      admins.map((a) => notify.adminNewBooking(String(a._id), booking, autoAssignedTo)),
+    );
   } catch (err) {
     console.error("[payment] admin notify failed", err);
   }

@@ -140,6 +140,8 @@ type EventContent = {
 type EventCtx = {
   ref: string;
   name: string;
+  /** The notification's own message, for events whose wording depends on the outcome. */
+  body?: string;
   driver?: { name?: string; phone?: string; plate?: string };
 };
 
@@ -218,10 +220,10 @@ const EVENTS: Partial<Record<NotificationType, (ctx: EventCtx) => EventContent>>
     ],
     cta: { label: "View booking", href: `/dashboard/bookings/${ref}` },
   }),
-  admin_new_booking: ({ ref }) => ({
+  admin_new_booking: ({ ref, body }) => ({
     subject: `New paid booking: ${ref}`,
-    heading: "New paid booking needs a rider",
-    paragraphs: [`${ref} has been paid for and is waiting to be assigned a rider.`],
+    heading: "New paid booking",
+    paragraphs: [body || `${ref} has been paid for.`],
     cta: { label: "Open in admin", href: `/admin/bookings/${ref}` },
   }),
   rider_job_assigned: ({ ref }) => ({
@@ -270,7 +272,7 @@ export function emailForEvent(params: {
   const build = EVENTS[params.type];
 
   const content: EventContent = build
-    ? build({ ref, name: params.recipientName ?? "", driver: params.driver })
+    ? build({ ref, name: params.recipientName ?? "", driver: params.driver, body: params.body })
     : {
         subject: params.title,
         heading: params.title,

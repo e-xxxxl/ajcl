@@ -44,6 +44,11 @@ export const env = {
   paystackSecretKey: get("PAYSTACK_SECRET_KEY"),
   paystackCurrency: get("PAYSTACK_CURRENCY") ?? "NGN",
 
+  /** Assign a rider automatically once a booking is paid. Set AUTO_ASSIGN_RIDERS=false to turn off. */
+  autoAssignRiders: get("AUTO_ASSIGN_RIDERS")?.toLowerCase() !== "false",
+  /** A rider already holding this many active jobs is skipped by auto-assignment. */
+  riderMaxActiveJobs: Math.max(1, Number(get("RIDER_MAX_ACTIVE_JOBS")) || 3),
+
   /** Resend transactional email. */
   resendApiKey: get("RESEND_API_KEY"),
   /** "Name <address@domain>" — the sender address must be on a Resend-verified domain. */

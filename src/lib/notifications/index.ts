@@ -210,12 +210,14 @@ export const notify = {
           : undefined,
     });
   },
-  async adminNewBooking(adminUserId: string, booking: BookingLike) {
+  async adminNewBooking(adminUserId: string, booking: BookingLike, autoAssignedTo?: string) {
     return dispatch({
       userId: adminUserId,
       type: "admin_new_booking",
-      title: "New paid booking",
-      body: `${booking.bookingReference} has been paid and needs a rider.`,
+      title: autoAssignedTo ? "New paid booking, rider assigned" : "New paid booking needs a rider",
+      body: autoAssignedTo
+        ? `${booking.bookingReference} has been paid and was automatically assigned to ${autoAssignedTo}.`
+        : `${booking.bookingReference} has been paid, but no rider was free to take it automatically. Please assign one.`,
       href: `/admin/bookings/${booking.bookingReference}`,
       bookingId: String(booking._id),
       bookingReference: booking.bookingReference,

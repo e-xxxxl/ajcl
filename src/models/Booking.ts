@@ -202,6 +202,8 @@ const bookingSchema = new Schema(
     /** The rider account actually assigned — links this booking to their job list.
      *  `assignedDriver` above stays in sync (name/phone/plate) for display. */
     assignedRider: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    /** When the rider was assigned (used to rotate jobs fairly between riders). */
+    riderAssignedAt: { type: Date },
 
     handover: { type: handoverSchema, default: () => ({}) },
 
