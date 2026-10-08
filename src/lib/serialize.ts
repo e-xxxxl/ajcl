@@ -30,7 +30,7 @@ type PopulatedUser = { _id: unknown; firstName: string; lastName: string; email:
 
 export function serializeBooking(
   b: Lean<BookingDoc> & { user?: PopulatedUser | unknown },
-  opts: { includeCustomer?: boolean } = {},
+  opts: { includeCustomer?: boolean; includePickupCode?: boolean } = {},
 ): BookingDTO {
   const loc = (l: BookingDoc["pickup"]) =>
     l
@@ -111,10 +111,22 @@ export function serializeBooking(
             plate: b.assignedDriver.plate ?? undefined,
           }
         : undefined,
+    assignedRiderId: b.assignedRider ? id(b.assignedRider) : undefined,
+    handover: {
+      pickupUsedAt: iso(b.handover?.pickupCodeUsedAt),
+      pickupLocked: b.handover?.pickupLocked ?? false,
+      deliveryUsedAt: iso(b.handover?.deliveryCodeUsedAt),
+      deliveryLocked: b.handover?.deliveryLocked ?? false,
+    },
+    pickupCode: opts.includePickupCode ? b.handover?.pickupCode ?? undefined : undefined,
+    trackingUrl:
+      opts.includePickupCode && b.handover?.trackingToken
+        ? `/track/${b.handover.trackingToken}`
+        : undefined,
     statusHistory: (b.statusHistory ?? []).map((s) => ({
       status: s.status as BookingDTO["status"],
       note: s.note ?? undefined,
-      changedByRole: (s.changedByRole ?? "system") as "system" | "customer" | "admin",
+      changedByRole: (s.changedByRole ?? "system") as "system" | "customer" | "admin" | "rider",
       at: iso(s.at) ?? "",
     })),
     createdAt: iso(b.createdAt) ?? "",

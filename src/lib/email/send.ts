@@ -2,12 +2,22 @@ import { env, isEmailConfigured } from "../env";
 
 const RESEND_URL = "https://api.resend.com/emails";
 
+/** An inline image referenced from the HTML as `<img src="cid:{contentId}">`. */
+export type InlineImage = {
+  filename: string;
+  /** Base64 file content. */
+  content: string;
+  contentId: string;
+  contentType?: string;
+};
+
 export type SendEmailInput = {
   to: string | string[];
   subject: string;
   html: string;
   text?: string;
   replyTo?: string;
+  inlineImages?: InlineImage[];
 };
 
 /**
@@ -39,6 +49,16 @@ export async function sendEmail(input: SendEmailInput): Promise<boolean> {
         html: input.html,
         text: input.text,
         reply_to: input.replyTo ?? env.supportEmail,
+        ...(input.inlineImages?.length
+          ? {
+              attachments: input.inlineImages.map((img) => ({
+                filename: img.filename,
+                content: img.content,
+                content_id: img.contentId,
+                content_type: img.contentType ?? "image/png",
+              })),
+            }
+          : {}),
       }),
     });
 

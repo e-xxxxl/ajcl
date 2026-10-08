@@ -15,6 +15,8 @@ import { bookingsRouter } from "./routes/bookings";
 import { paymentsRouter } from "./routes/payments";
 import { notificationsRouter } from "./routes/notifications";
 import { adminRouter } from "./routes/admin";
+import { riderRouter } from "./routes/rider";
+import { trackingRouter } from "./routes/tracking";
 
 const app = express();
 
@@ -49,6 +51,8 @@ app.use("/api/bookings", bookingsRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/notifications", notificationsRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/rider", riderRouter);
+app.use("/api/track", trackingRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

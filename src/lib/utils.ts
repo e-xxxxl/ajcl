@@ -17,5 +17,10 @@ export function slugify(input: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/** A random 6-digit numeric handover code, e.g. "483921" (zero-padded). */
+export function generateHandoverCode(): string {
+  return String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0");
+}
+
 /** Small helper to pause execution. */
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

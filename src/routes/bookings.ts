@@ -78,13 +78,17 @@ bookingsRouter.get(
 
     const booking = await Booking.findOne({
       bookingReference: req.params.reference.toUpperCase(),
-    }).lean();
+    })
+      .select("+handover.pickupCode +handover.trackingToken")
+      .lean();
     if (!booking) throw new ApiError("Booking not found.", 404);
     if (String(booking.user) !== session.sub && session.role !== "admin") {
       throw new ApiError("Booking not found.", 404); // don't leak existence
     }
 
-    return ok(res, { booking: serializeBooking(booking) });
+    // Only the booking's own customer ever sees the pickup code — never admin/rider.
+    const isOwner = String(booking.user) === session.sub;
+    return ok(res, { booking: serializeBooking(booking, { includePickupCode: isOwner }) });
   }),
 );
 

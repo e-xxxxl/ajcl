@@ -92,9 +92,42 @@ const statusEntrySchema = new Schema(
   {
     status: { type: String, required: true },
     note: { type: String, trim: true, maxlength: 500 },
-    changedByRole: { type: String, enum: ["system", "customer", "admin"], default: "system" },
+    changedByRole: {
+      type: String,
+      enum: ["system", "customer", "admin", "rider"],
+      default: "system",
+    },
     changedBy: { type: Schema.Types.ObjectId, ref: "User" },
     at: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
+/**
+ * Secure handover codes. The pickup code is only ever shown to the sender
+ * (the account that owns this booking); the delivery code is only reachable
+ * via the receiver's tracking link (`trackingToken`) — neither is exposed in
+ * any admin or rider API response. Codes are generated once, when payment
+ * succeeds (see `reconcilePayment`), and are single-use.
+ */
+const handoverSchema = new Schema(
+  {
+    pickupCode: { type: String, select: false },
+    pickupCodeUsedAt: { type: Date },
+    pickupAttempts: { type: Number, default: 0 },
+    pickupLocked: { type: Boolean, default: false },
+
+    deliveryCode: { type: String, select: false },
+    deliveryCodeUsedAt: { type: Date },
+    deliveryAttempts: { type: Number, default: 0 },
+    deliveryLocked: { type: Boolean, default: false },
+
+    /** Unguessable id for the receiver's no-login tracking page. */
+    trackingToken: { type: String, index: true, sparse: true, select: false },
+
+    /** Set (atomically) when the confirmation emails go out, so a payment callback
+     *  and webhook arriving together can't double-send them. */
+    codesEmailedAt: { type: Date },
   },
   { _id: false },
 );
@@ -166,6 +199,11 @@ const bookingSchema = new Schema(
       phone: { type: String, trim: true },
       plate: { type: String, trim: true, uppercase: true, maxlength: 20 },
     },
+    /** The rider account actually assigned — links this booking to their job list.
+     *  `assignedDriver` above stays in sync (name/phone/plate) for display. */
+    assignedRider: { type: Schema.Types.ObjectId, ref: "User", index: true },
+
+    handover: { type: handoverSchema, default: () => ({}) },
 
     cancelledReason: { type: String, trim: true, maxlength: 500 },
     confirmedAt: { type: Date },
@@ -177,6 +215,7 @@ const bookingSchema = new Schema(
 bookingSchema.index({ createdAt: -1 });
 bookingSchema.index({ user: 1, status: 1 });
 bookingSchema.index({ status: 1, scheduledAt: 1 });
+bookingSchema.index({ assignedRider: 1, status: 1 });
 
 bookingSchema.set("toJSON", {
   virtuals: true,
@@ -184,6 +223,14 @@ bookingSchema.set("toJSON", {
     delete ret.__v;
     if (ret.payment && typeof ret.payment === "object") {
       delete (ret.payment as Record<string, unknown>).rawVerification;
+    }
+    // Defence in depth — these are `select: false` already, but a raw code
+    // must never reach a JSON response by accident.
+    if (ret.handover && typeof ret.handover === "object") {
+      const h = ret.handover as Record<string, unknown>;
+      delete h.pickupCode;
+      delete h.deliveryCode;
+      delete h.trackingToken;
     }
     return ret;
   },

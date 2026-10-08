@@ -12,7 +12,7 @@ const statusHistorySchema = new Schema(
     fromStatus: { type: String },
     toStatus: { type: String, required: true },
     note: { type: String, trim: true, maxlength: 500 },
-    actorRole: { type: String, enum: ["system", "customer", "admin"], required: true },
+    actorRole: { type: String, enum: ["system", "customer", "admin", "rider"], required: true },
     actor: { type: Schema.Types.ObjectId, ref: "User" },
     actorName: { type: String },
     at: { type: Date, default: Date.now, index: true },

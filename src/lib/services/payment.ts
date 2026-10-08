@@ -10,6 +10,8 @@ import { computeRouteMetrics, bookingToRouteInput } from "./quote";
 import { changeBookingStatus } from "./booking";
 import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
+import { ensureHandoverCodes } from "./handover";
+import { sendConfirmationEmails } from "./booking-emails";
 import {
   initializeTransaction,
   verifyTransaction,
@@ -219,20 +221,24 @@ export async function reconcilePayment(
     booking.set("payment.rawVerification", verification.raw);
     await booking.save();
 
+    await ensureHandoverCodes(booking);
     await notify.paymentSucceeded(String(booking.user), booking);
 
+    let finalBooking: BookingHydrated = booking;
     if (booking.status === "pending") {
-      const confirmed = await changeBookingStatus({
+      finalBooking = await changeBookingStatus({
         bookingId: String(booking._id),
         to: "confirmed",
         note: "Payment received",
         actorRole: "system",
       });
-      await notifyAdmins(confirmed);
-      return { booking: confirmed, paid: true, status: "paid" };
+      await notifyAdmins(finalBooking);
     }
 
-    return { booking, paid: true, status: "paid" };
+    // Paid and confirmed: email the sender and receiver their codes (once only).
+    await sendConfirmationEmails(finalBooking);
+
+    return { booking: finalBooking, paid: true, status: "paid" };
   }
 
   if (verification.status !== "pending") {

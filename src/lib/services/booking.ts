@@ -9,6 +9,7 @@ import { calculatePrice } from "../pricing/engine";
 import { computeRouteMetrics } from "./quote";
 import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
+import { sendRiderAssignedEmails } from "./booking-emails";
 import { BOOKING_STATUS_FLOW, type BookingStatus } from "../../config/booking";
 import type { CreateBookingInput } from "../validation/booking";
 
@@ -158,7 +159,7 @@ export async function changeBookingStatus(params: {
   bookingId: string;
   to: BookingStatus;
   note?: string;
-  actorRole: "admin" | "system" | "customer";
+  actorRole: "admin" | "system" | "customer" | "rider";
   actorId?: string;
   driver?: { name?: string; phone?: string; plate?: string };
   force?: boolean;
@@ -219,7 +220,13 @@ export async function changeBookingStatus(params: {
     at: now,
   });
 
-  await notify.statusChanged(String(booking.user), booking, to);
+  // Payment-driven confirmation and rider assignment have richer, purpose-built
+  // emails (code + QR, rider details), so only the in-app notification is made here.
+  const paymentDriven = to === "confirmed" && params.actorRole === "system";
+  await notify.statusChanged(String(booking.user), booking, to, {
+    skipEmail: paymentDriven || to === "driver_assigned",
+  });
+  if (to === "driver_assigned") await sendRiderAssignedEmails(booking._id);
 
   return booking;
 }

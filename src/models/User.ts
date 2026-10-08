@@ -15,9 +15,16 @@ const userSchema = new Schema(
     phone: { type: String, required: true, trim: true, maxlength: 30 },
     /** bcrypt hash — never selected by default. */
     passwordHash: { type: String, required: true, select: false },
-    role: { type: String, enum: ["customer", "admin"], default: "customer", index: true },
+    role: { type: String, enum: ["customer", "admin", "rider"], default: "customer", index: true },
     /** Elevated admin — can create other admins and delete bookings. */
     superAdmin: { type: Boolean, default: false },
+    /** Only present when role === "rider". */
+    rider: {
+      plate: { type: String, trim: true, uppercase: true, maxlength: 20 },
+      vehicleType: { type: String, trim: true, maxlength: 60 },
+      /** Inactive riders can't log in or receive new jobs. */
+      active: { type: Boolean, default: true },
+    },
     /** Password reset flow. */
     resetTokenHash: { type: String, select: false },
     resetTokenExpiresAt: { type: Date, select: false },

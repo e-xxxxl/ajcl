@@ -35,6 +35,8 @@ export type NotificationPayload = {
   /** Contact hints for other channels. */
   email?: string;
   phone?: string;
+  /** Create the in-app notification only. A richer email is sent separately. */
+  skipEmail?: boolean;
 };
 
 const CHANNEL_DRIVERS: ChannelDriver[] = [];
@@ -62,6 +64,7 @@ export async function dispatch(payload: NotificationPayload): Promise<void> {
   }
 
   for (const driver of CHANNEL_DRIVERS) {
+    if (payload.skipEmail && driver.channel === "email") continue;
     if (!driver.enabled()) continue;
     try {
       await driver.send(payload);
@@ -137,6 +140,8 @@ export const notify = {
       href: bookingHref(booking.bookingReference),
       bookingId: String(booking._id),
       bookingReference: booking.bookingReference,
+      // The confirmation email (pickup code + QR) is sent by sendConfirmationEmails.
+      skipEmail: true,
     });
   },
   async paymentFailed(userId: string, booking: BookingLike) {
@@ -150,7 +155,12 @@ export const notify = {
       bookingReference: booking.bookingReference,
     });
   },
-  async statusChanged(userId: string, booking: BookingLike, status: string) {
+  async statusChanged(
+    userId: string,
+    booking: BookingLike,
+    status: string,
+    opts: { skipEmail?: boolean } = {},
+  ) {
     const map: Record<string, { type: NotificationType; title: string; body: string }> = {
       confirmed: {
         type: "booking_confirmed",
@@ -189,6 +199,7 @@ export const notify = {
       href: bookingHref(booking.bookingReference),
       bookingId: String(booking._id),
       bookingReference: booking.bookingReference,
+      skipEmail: opts.skipEmail,
       driver:
         status === "driver_assigned" && d
           ? {
@@ -210,4 +221,53 @@ export const notify = {
       bookingReference: booking.bookingReference,
     });
   },
+  /** To the rider themselves — a new job landed in their dashboard. */
+  async riderJobAssigned(riderId: string, booking: BookingLike) {
+    return dispatch({
+      userId: riderId,
+      type: "rider_job_assigned",
+      title: "New delivery assigned",
+      body: `You've been assigned booking ${booking.bookingReference}. Open it for pickup details.`,
+      href: "/rider",
+      bookingId: String(booking._id),
+      bookingReference: booking.bookingReference,
+    });
+  },
+  /** To every admin — fired by the rider's pickup/delivery scan, and on a locked code. */
+  async adminAlert(
+    adminUserId: string,
+    booking: BookingLike,
+    kind: "admin_pickup_confirmed" | "admin_delivery_confirmed" | "admin_code_locked",
+    body: string,
+  ) {
+    const titles: Record<typeof kind, string> = {
+      admin_pickup_confirmed: "Package picked up",
+      admin_delivery_confirmed: "Package delivered",
+      admin_code_locked: "Handover code locked",
+    };
+    return dispatch({
+      userId: adminUserId,
+      type: kind,
+      title: titles[kind],
+      body,
+      href: `/admin/bookings/${booking.bookingReference}`,
+      bookingId: String(booking._id),
+      bookingReference: booking.bookingReference,
+    });
+  },
 };
+
+/** Fan a notification out to every admin account. Never throws. */
+export async function notifyAllAdmins(
+  booking: BookingLike,
+  kind: "admin_pickup_confirmed" | "admin_delivery_confirmed" | "admin_code_locked",
+  body: string,
+): Promise<void> {
+  try {
+    await connectToDatabase();
+    const admins = await User.find({ role: "admin" }).select("_id").lean();
+    await Promise.all(admins.map((a) => notify.adminAlert(String(a._id), booking, kind, body)));
+  } catch (err) {
+    console.error("[notifications] adminAlert fan-out failed", err);
+  }
+}

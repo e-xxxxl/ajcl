@@ -11,13 +11,13 @@ const LINE = "#e6e6e6";
 
 const LOGO_URL = `${env.frontendUrl}/logo.png`;
 
-function esc(s: string): string {
+export function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
   );
 }
 
-function absUrl(href?: string): string | undefined {
+export function absUrl(href?: string): string | undefined {
   if (!href) return undefined;
   if (/^https?:\/\//i.test(href)) return href;
   return `${env.frontendUrl}${href.startsWith("/") ? "" : "/"}${href}`;
@@ -28,6 +28,12 @@ type LayoutInput = {
   heading: string;
   /** Paragraphs of body copy (plain text; rendered as <p>). */
   paragraphs: string[];
+  /** Raw HTML inserted after the paragraphs and before the button, e.g. a code box. */
+  block?: string;
+  /** Plain-text lines that stand in for `block` in the text version. */
+  blockText?: string[];
+  /** Replaces the default "you have an account" line in the footer. */
+  footerNote?: string;
   cta?: { label: string; href: string };
   /** Small print under the button, e.g. a fallback link. */
   note?: string;
@@ -80,6 +86,7 @@ export function renderEmail(input: LayoutInput): { html: string; text: string } 
           input.heading,
         )}</h1>
         ${paragraphsHtml}
+        ${input.block ?? ""}
         ${ctaHtml}
         ${noteHtml}
       </td></tr>
@@ -98,7 +105,7 @@ export function renderEmail(input: LayoutInput): { html: string; text: string } 
           &nbsp;·&nbsp; ${esc(site.contact.address)}
         </p>
         <p style="margin:12px 0 0;font-size:11px;line-height:1.6;color:#9a9a9a;">
-          You're receiving this email because you have an account with ${esc(site.name)}.
+          ${esc(input.footerNote ?? `You're receiving this email because you have an account with ${site.name}.`)}
         </p>
       </td></tr>
     </table>
@@ -110,6 +117,7 @@ export function renderEmail(input: LayoutInput): { html: string; text: string } 
     input.heading,
     "",
     ...input.paragraphs,
+    ...(input.blockText?.length ? ["", ...input.blockText] : []),
     ...(input.cta && ctaUrl ? ["", `${input.cta.label}: ${ctaUrl}`] : []),
     ...(input.note ? ["", input.note] : []),
     "",
@@ -214,6 +222,35 @@ const EVENTS: Partial<Record<NotificationType, (ctx: EventCtx) => EventContent>>
     subject: `New paid booking: ${ref}`,
     heading: "New paid booking needs a rider",
     paragraphs: [`${ref} has been paid for and is waiting to be assigned a rider.`],
+    cta: { label: "Open in admin", href: `/admin/bookings/${ref}` },
+  }),
+  rider_job_assigned: ({ ref }) => ({
+    subject: `New delivery assigned — ${ref}`,
+    heading: "You've been assigned a delivery",
+    paragraphs: [
+      `Booking ${ref} has been assigned to you. Open your rider dashboard for the pickup address, package details and the sender's contact.`,
+      "Ask the sender for their pickup code (or scan their QR) to confirm pickup, and the receiver's code to confirm delivery.",
+    ],
+    cta: { label: "View job", href: `/rider` },
+  }),
+  admin_pickup_confirmed: ({ ref }) => ({
+    subject: `Picked up — ${ref}`,
+    heading: "Package picked up",
+    paragraphs: [`The pickup code for ${ref} was verified and the rider has collected the package.`],
+    cta: { label: "Open in admin", href: `/admin/bookings/${ref}` },
+  }),
+  admin_delivery_confirmed: ({ ref }) => ({
+    subject: `Delivered — ${ref}`,
+    heading: "Package delivered",
+    paragraphs: [`The delivery code for ${ref} was verified and the package has been handed over.`],
+    cta: { label: "Open in admin", href: `/admin/bookings/${ref}` },
+  }),
+  admin_code_locked: ({ ref }) => ({
+    subject: `Action needed — ${ref} handover code locked`,
+    heading: "A handover code was locked",
+    paragraphs: [
+      `Too many incorrect attempts were made on booking ${ref}. It's now locked for safety — review it and reset the code if needed.`,
+    ],
     cta: { label: "Open in admin", href: `/admin/bookings/${ref}` },
   }),
 };

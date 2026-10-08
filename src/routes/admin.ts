@@ -18,9 +18,10 @@ import { serializeBooking, serializeVehicle } from "../lib/serialize";
 import { getAdminStats, listBookingsForAdmin } from "../lib/services/admin";
 import { changeBookingStatus } from "../lib/services/booking";
 import { activeUnitsBySlug } from "../lib/services/fleet";
+import { assignRiderToBooking, resetHandoverLock } from "../lib/services/rider";
 import { vehicleUpsertSchema, vehiclePatchSchema } from "../lib/validation/vehicle";
 import { slugify } from "../lib/utils";
-import { BOOKING_STATUS_FLOW } from "../config/booking";
+import { BOOKING_STATUS_FLOW, type BookingStatus } from "../config/booking";
 
 export const adminRouter = Router();
 
@@ -192,6 +193,22 @@ adminRouter.patch(
     });
     if (!booking) throw new ApiError("Booking not found.", 404);
 
+    // These three moves are driven by the rider portal (assign-rider, pickup and
+    // delivery code scans) so every step is verified. The plain status control
+    // only reaches them with an explicit override, for genuine emergencies.
+    if (!input.force && input.status === "driver_assigned") {
+      throw new ApiError(
+        "Use “Assign rider” to move a booking to Driver assigned — it links the job to a real rider account.",
+        409,
+      );
+    }
+    if (!input.force && (input.status === "in_transit" || input.status === "delivered")) {
+      throw new ApiError(
+        "This status is set automatically when the rider verifies the pickup/delivery code. Turn on override to set it manually.",
+        409,
+      );
+    }
+
     const updated = await changeBookingStatus({
       bookingId: String(booking._id),
       to: input.status,
@@ -209,27 +226,80 @@ adminRouter.patch(
   }),
 );
 
-const riderSchema = z.object({
+const assignRiderSchema = z.object({
+  riderId: z.string().trim().min(1, "Pick a rider"),
+  note: z.string().trim().max(300).optional(),
+});
+
+/** PATCH /api/admin/bookings/:reference/assign-rider — assign a registered rider
+ *  account. Moves confirmed → driver_assigned (or swaps the rider before pickup). */
+adminRouter.patch(
+  "/bookings/:reference/assign-rider",
+  asyncHandler(async (req, res) => {
+    const admin = requireAdmin(req);
+    await connectToDatabase();
+
+    const input = parse(assignRiderSchema, req.body);
+    const updated = await assignRiderToBooking({
+      bookingReference: req.params.reference,
+      riderId: input.riderId,
+      actorId: admin.sub,
+      note: input.note,
+    });
+
+    return ok(res, { booking: serializeBooking(updated.toObject(), { includeCustomer: false }) });
+  }),
+);
+
+/** DELETE /api/admin/bookings/:reference/assign-rider — unassign, before pickup only. */
+adminRouter.delete(
+  "/bookings/:reference/assign-rider",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+
+    const booking = await Booking.findOne({
+      bookingReference: req.params.reference.toUpperCase(),
+    });
+    if (!booking) throw new ApiError("Booking not found.", 404);
+    if (booking.handover?.pickupCodeUsedAt) {
+      throw new ApiError("The package has already been picked up — the rider can't be unassigned.", 409);
+    }
+    booking.set("assignedRider", undefined);
+    booking.set("assignedDriver", undefined);
+    await booking.save();
+
+    return ok(res, { booking: serializeBooking(booking.toObject(), { includeCustomer: false }) });
+  }),
+);
+
+const riderTextSchema = z.object({
   name: z.string().trim().max(120).optional().default(""),
   phone: z.string().trim().max(30).optional().default(""),
   plate: z.string().trim().max(20).optional().default(""),
 });
 
-/** PATCH /api/admin/bookings/:reference/rider — set/update the assigned rider
- *  (name, phone, plate) without changing the booking status. */
+/** PATCH /api/admin/bookings/:reference/rider — manual rider details (name, phone,
+ *  plate) for a booking with no linked rider account, e.g. a one-off dispatch. */
 adminRouter.patch(
   "/bookings/:reference/rider",
   asyncHandler(async (req, res) => {
     requireAdmin(req);
     await connectToDatabase();
 
-    const input = parse(riderSchema, req.body);
+    const input = parse(riderTextSchema, req.body);
     const booking = await Booking.findOne({
       bookingReference: req.params.reference.toUpperCase(),
     });
     if (!booking) throw new ApiError("Booking not found.", 404);
     if (["delivered", "cancelled"].includes(booking.status)) {
       throw new ApiError("This booking is closed — rider details can't be changed.", 409);
+    }
+    if (booking.assignedRider) {
+      throw new ApiError(
+        "A registered rider is linked to this booking. Unassign them first to edit details manually.",
+        409,
+      );
     }
 
     booking.assignedDriver = {
@@ -240,6 +310,27 @@ adminRouter.patch(
     await booking.save();
 
     return ok(res, { booking: serializeBooking(booking.toObject(), { includeCustomer: false }) });
+  }),
+);
+
+const resetLockSchema = z.object({ stage: z.enum(["pickup", "delivery"]) });
+
+/** POST /api/admin/bookings/:reference/handover/reset — clear a locked code
+ *  after too many wrong attempts. The code itself is unchanged. */
+adminRouter.post(
+  "/bookings/:reference/handover/reset",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+    const { stage } = parse(resetLockSchema, req.body);
+
+    const booking = await Booking.findOne({
+      bookingReference: req.params.reference.toUpperCase(),
+    });
+    if (!booking) throw new ApiError("Booking not found.", 404);
+
+    const updated = await resetHandoverLock(booking.bookingReference, stage);
+    return ok(res, { booking: serializeBooking(updated.toObject(), { includeCustomer: false }) });
   }),
 );
 
@@ -386,6 +477,175 @@ adminRouter.delete(
 
     await User.deleteOne({ _id: target._id });
     console.info(`[admin] ${me.email} removed admin ${target.email}`);
+    return ok(res, { deleted: true });
+  }),
+);
+
+/* ── Riders (any admin can manage the rider roster) ────────────────────── */
+
+const createRiderSchema = z.object({
+  firstName: z.string().trim().min(1, "Required").max(60),
+  lastName: z.string().trim().min(1, "Required").max(60),
+  email: z.string().trim().toLowerCase().email("Enter a valid email"),
+  phone: z
+    .string()
+    .trim()
+    .min(7, "Enter a valid phone number")
+    .max(20, "Enter a valid phone number"),
+  plate: z.string().trim().max(20).optional().default(""),
+  vehicleType: z.string().trim().max(60).optional().default(""),
+  password: z
+    .string()
+    .min(8, "Use at least 8 characters")
+    .max(72)
+    .regex(/[a-z]/, "Add a lowercase letter")
+    .regex(/[A-Z]/, "Add an uppercase letter")
+    .regex(/[0-9]/, "Add a number"),
+});
+
+const riderPatchSchema = z.object({
+  firstName: z.string().trim().min(1).max(60).optional(),
+  lastName: z.string().trim().min(1).max(60).optional(),
+  phone: z.string().trim().min(7).max(20).optional(),
+  plate: z.string().trim().max(20).optional(),
+  vehicleType: z.string().trim().max(60).optional(),
+  active: z.boolean().optional(),
+  password: z
+    .string()
+    .min(8, "Use at least 8 characters")
+    .max(72)
+    .regex(/[a-z]/, "Add a lowercase letter")
+    .regex(/[A-Z]/, "Add an uppercase letter")
+    .regex(/[0-9]/, "Add a number")
+    .optional(),
+});
+
+type RiderLean = {
+  _id: unknown;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  rider?: { plate?: string; vehicleType?: string; active?: boolean };
+  lastLoginAt?: Date | null;
+  createdAt?: Date | string;
+};
+
+async function serializeRider(u: RiderLean) {
+  const riderId = String(u._id);
+  const [activeJobs, completedJobs] = await Promise.all([
+    Booking.countDocuments({
+      assignedRider: riderId,
+      status: { $in: ["driver_assigned", "in_transit"] as BookingStatus[] },
+    }),
+    Booking.countDocuments({ assignedRider: riderId, status: "delivered" as BookingStatus }),
+  ]);
+  return {
+    id: String(u._id),
+    firstName: u.firstName,
+    lastName: u.lastName,
+    fullName: `${u.firstName} ${u.lastName}`.trim(),
+    email: u.email,
+    phone: u.phone,
+    plate: u.rider?.plate || undefined,
+    vehicleType: u.rider?.vehicleType || undefined,
+    active: u.rider?.active !== false,
+    activeJobs,
+    completedJobs,
+    lastLoginAt: u.lastLoginAt ? new Date(u.lastLoginAt).toISOString() : null,
+    createdAt: u.createdAt ? new Date(u.createdAt as string).toISOString() : null,
+  };
+}
+
+/** GET /api/admin/riders — list rider accounts with live job counts. */
+adminRouter.get(
+  "/riders",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+    const riders = await User.find({ role: "rider" }).sort({ createdAt: 1 }).lean();
+    return ok(res, { riders: await Promise.all(riders.map((r) => serializeRider(r as RiderLean))) });
+  }),
+);
+
+/** POST /api/admin/riders — create a new rider account. */
+adminRouter.post(
+  "/riders",
+  asyncHandler(async (req, res) => {
+    const me = requireAdmin(req);
+    await connectToDatabase();
+    const input = parse(createRiderSchema, req.body);
+
+    if (await User.exists({ email: input.email })) {
+      throw new ApiError("An account with that email already exists.", 409);
+    }
+
+    const rider = await User.create({
+      firstName: input.firstName,
+      lastName: input.lastName,
+      email: input.email,
+      phone: input.phone,
+      passwordHash: await hashPassword(input.password),
+      role: "rider",
+      rider: { plate: input.plate || undefined, vehicleType: input.vehicleType || undefined, active: true },
+    });
+    console.info(`[admin] ${me.email} created rider ${input.email}`);
+
+    return ok(res, { rider: await serializeRider(rider.toObject() as RiderLean) }, 201);
+  }),
+);
+
+/** PATCH /api/admin/riders/:id — edit a rider's details, activate/deactivate, or reset their password. */
+adminRouter.patch(
+  "/riders/:id",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+    const input = parse(riderPatchSchema, req.body);
+
+    const rider = await User.findOne({ _id: req.params.id, role: "rider" });
+    if (!rider) throw new ApiError("Rider not found.", 404);
+
+    if (input.firstName !== undefined) rider.firstName = input.firstName;
+    if (input.lastName !== undefined) rider.lastName = input.lastName;
+    if (input.phone !== undefined) rider.phone = input.phone;
+    if (input.password) rider.passwordHash = await hashPassword(input.password);
+
+    const currentRider = (rider as unknown as { rider?: { plate?: string; vehicleType?: string; active?: boolean } }).rider ?? {};
+    rider.set("rider", {
+      plate: input.plate !== undefined ? input.plate : currentRider.plate,
+      vehicleType: input.vehicleType !== undefined ? input.vehicleType : currentRider.vehicleType,
+      active: input.active !== undefined ? input.active : currentRider.active !== false,
+    });
+    await rider.save();
+
+    return ok(res, { rider: await serializeRider(rider.toObject() as RiderLean) });
+  }),
+);
+
+/** DELETE /api/admin/riders/:id — remove a rider account (blocked while they have active jobs). */
+adminRouter.delete(
+  "/riders/:id",
+  asyncHandler(async (req, res) => {
+    const me = requireAdmin(req);
+    await connectToDatabase();
+
+    const rider = await User.findOne({ _id: req.params.id, role: "rider" });
+    if (!rider) throw new ApiError("Rider not found.", 404);
+
+    const activeJobs = await Booking.countDocuments({
+      assignedRider: rider._id,
+      status: { $in: ["driver_assigned", "in_transit"] as BookingStatus[] },
+    });
+    if (activeJobs > 0) {
+      throw new ApiError(
+        "This rider has active deliveries. Reassign or complete them before removing the account.",
+        409,
+      );
+    }
+
+    await User.deleteOne({ _id: rider._id });
+    console.info(`[admin] ${me.email} removed rider ${rider.email}`);
     return ok(res, { deleted: true });
   }),
 );

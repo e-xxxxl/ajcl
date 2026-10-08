@@ -57,6 +57,12 @@ export function requireAdmin(req: Request): SessionClaims {
   return session;
 }
 
+export function requireRider(req: Request): SessionClaims {
+  const session = requireSession(req);
+  if (session.role !== "rider") throw new ForbiddenError();
+  return session;
+}
+
 export function requireSuperAdmin(req: Request): SessionClaims {
   const session = requireAdmin(req);
   if (!session.superAdmin) {
@@ -76,6 +82,11 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
     await connectToDatabase();
     const user = await User.findById(session.sub).lean();
     if (!user) return null;
+    const u = user as unknown as {
+      role: string;
+      superAdmin?: boolean;
+      rider?: { plate?: string; vehicleType?: string; active?: boolean };
+    };
     return {
       id: String(user._id),
       firstName: user.firstName,
@@ -83,8 +94,12 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
       fullName: `${user.firstName} ${user.lastName}`.trim(),
       email: user.email,
       phone: user.phone,
-      role: user.role as "customer" | "admin",
-      superAdmin: Boolean((user as { superAdmin?: boolean }).superAdmin),
+      role: u.role as "customer" | "admin" | "rider",
+      superAdmin: Boolean(u.superAdmin),
+      rider:
+        u.role === "rider"
+          ? { plate: u.rider?.plate, vehicleType: u.rider?.vehicleType, active: u.rider?.active !== false }
+          : undefined,
     };
   } catch {
     const [firstName, ...rest] = session.name.split(" ");

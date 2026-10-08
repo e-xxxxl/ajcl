@@ -9,8 +9,26 @@ export type SessionUser = {
   fullName: string;
   email: string;
   phone: string;
-  role: "customer" | "admin";
+  role: "customer" | "admin" | "rider";
   superAdmin?: boolean;
+  /** Only present when role === "rider". */
+  rider?: { plate?: string; vehicleType?: string; active: boolean };
+};
+
+export type RiderAccountDTO = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  plate?: string;
+  vehicleType?: string;
+  active: boolean;
+  activeJobs: number;
+  completedJobs: number;
+  lastLoginAt: string | null;
+  createdAt: string | null;
 };
 
 export type VehicleDTO = {
@@ -83,8 +101,15 @@ export type PackageDTO = {
 export type BookingStatusEntryDTO = {
   status: BookingStatus;
   note?: string;
-  changedByRole: "system" | "customer" | "admin";
+  changedByRole: "system" | "customer" | "admin" | "rider";
   at: string;
+};
+
+export type HandoverStatusDTO = {
+  pickupUsedAt?: string;
+  pickupLocked: boolean;
+  deliveryUsedAt?: string;
+  deliveryLocked: boolean;
 };
 
 export type BookingDTO = {
@@ -117,10 +142,35 @@ export type BookingDTO = {
     paidAt?: string;
   };
   assignedDriver?: { name?: string; phone?: string; plate?: string };
+  assignedRiderId?: string;
+  handover?: HandoverStatusDTO;
+  /** The sender's pickup code — only ever included for the booking's own owner. */
+  pickupCode?: string;
+  /** Relative link to the receiver's public tracking page (`/track/<token>`) — so the
+   *  sender can forward it manually. Only ever included for the booking's own owner. */
+  trackingUrl?: string;
   statusHistory: BookingStatusEntryDTO[];
   createdAt: string;
   updatedAt: string;
   customer?: { id: string; fullName: string; email: string; phone: string };
+};
+
+/** Public, no-login payload for the receiver's tracking page (GET /api/track/:token). */
+export type TrackingDTO = {
+  bookingReference: string;
+  status: BookingStatus;
+  recipientName: string;
+  pickup: LocationDTO;
+  destination: LocationDTO;
+  vehicleName: string;
+  scheduledDate: string;
+  scheduledTime: string;
+  rider?: { name?: string; phone?: string; plate?: string };
+  statusHistory: Array<{ status: BookingStatus; at: string }>;
+  /** The receiver's delivery code — shown until it's used. */
+  deliveryCode?: string;
+  deliveryUsedAt?: string;
+  deliveryLocked: boolean;
 };
 
 export type NotificationDTO = {

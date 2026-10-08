@@ -2,8 +2,10 @@ import { connectToDatabase } from "./db";
 import { env } from "./env";
 import { User } from "../models/User";
 import { Vehicle } from "../models/Vehicle";
+import { Booking } from "../models/Booking";
 import { VEHICLE_SEEDS } from "../config/pricing";
 import { hashPassword } from "./auth/password";
+import { ensureHandoverCodes } from "./services/handover";
 
 const globalForBootstrap = globalThis as unknown as { _ajcBootstrapped?: boolean };
 
@@ -78,6 +80,27 @@ export async function ensureBootstrapped(): Promise<void> {
           { $set: { role: "admin", superAdmin: true } },
         );
       }
+    }
+
+    // Backfill handover codes for paid, still-active bookings created before this
+    // feature shipped (a fresh booking gets its codes the moment payment succeeds).
+    try {
+      const legacy = await Booking.find({
+        "payment.status": "paid",
+        status: { $in: ["confirmed", "driver_assigned", "in_transit"] },
+        "handover.pickupCode": { $exists: false },
+      })
+        .select("_id")
+        .lean();
+      for (const b of legacy) {
+        const full = await Booking.findById(b._id);
+        if (full) await ensureHandoverCodes(full);
+      }
+      if (legacy.length > 0) {
+        console.info(`[bootstrap] generated handover codes for ${legacy.length} existing booking(s)`);
+      }
+    } catch (err) {
+      console.error("[bootstrap] handover code backfill failed", err);
     }
 
     globalForBootstrap._ajcBootstrapped = true;
