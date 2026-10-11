@@ -23,6 +23,13 @@ const locationSchema = new Schema(
     label: { type: String, trim: true, maxlength: 120 },
     /** True when the address was typed manually (no Google resolution). */
     manual: { type: Boolean, default: false },
+    /** House/flat number, floor, landmark, gate instructions: what the rider needs at the door. */
+    details: { type: String, trim: true, maxlength: 300 },
+    /** Structured parts of the Google address, for a readable display. */
+    name: { type: String, trim: true, maxlength: 160 },
+    area: { type: String, trim: true, maxlength: 120 },
+    city: { type: String, trim: true, maxlength: 120 },
+    state: { type: String, trim: true, maxlength: 120 },
   },
   { _id: false },
 );

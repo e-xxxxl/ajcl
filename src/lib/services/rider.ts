@@ -6,6 +6,16 @@ import { changeBookingStatus } from "./booking";
 import { ensureHandoverCodes } from "./handover";
 import { sendRiderAssignedEmails } from "./booking-emails";
 import { autoAssignPending } from "./autoassign";
+import { signProofToken, verifyProofToken, PROOF_TOKEN_TTL_SECONDS } from "../auth/jwt";
+import {
+  MAX_PROOF_PHOTOS,
+  parsePhoto,
+  checkLocation,
+  assessLocation,
+  saveProof,
+  deleteProof,
+  type LocationInput,
+} from "./proof";
 import { notify, notifyAllAdmins } from "../notifications";
 
 const MAX_CODE_ATTEMPTS = 5;
@@ -87,126 +97,203 @@ async function loadRiderJob(bookingReference: string, riderId: string, codeField
   return booking;
 }
 
-/** Rider confirms pickup by scanning/typing the sender's code. */
-export async function confirmPickup(params: {
+type Stage = "pickup" | "delivery";
+
+const STAGE = {
+  pickup: {
+    codeField: "pickupCode" as const,
+    usedField: "pickupCodeUsedAt" as const,
+    lockedField: "pickupLocked" as const,
+    attemptsField: "pickupAttempts" as const,
+    from: "driver_assigned" as const,
+    to: "in_transit" as const,
+    note: "Pickup verified by rider (code, photo and location)",
+    word: "pickup",
+    owner: "sender",
+  },
+  delivery: {
+    codeField: "deliveryCode" as const,
+    usedField: "deliveryCodeUsedAt" as const,
+    lockedField: "deliveryLocked" as const,
+    attemptsField: "deliveryAttempts" as const,
+    from: "in_transit" as const,
+    to: "delivered" as const,
+    note: "Delivery verified by rider (code, photo and location)",
+    word: "delivery",
+    owner: "receiver",
+  },
+};
+
+/** Step 1. The rider scans or types the code. If it is right they get a short-lived
+ *  token that unlocks step 2 (photo + location). The code is NOT consumed yet. */
+export async function verifyHandoverCode(params: {
   bookingReference: string;
   riderId: string;
+  stage: Stage;
   code: string;
-}): Promise<BookingHydrated> {
+}): Promise<{ proofToken: string; expiresInSeconds: number }> {
   await connectToDatabase();
-  const booking = await loadRiderJob(params.bookingReference, params.riderId, "pickupCode");
+  const cfg = STAGE[params.stage];
+  const booking = await loadRiderJob(params.bookingReference, params.riderId, cfg.codeField);
 
-  if (booking.status !== "driver_assigned") {
-    if (booking.status === "in_transit" || booking.status === "delivered") {
-      throw new ApiError("Pickup has already been confirmed for this booking.", 409);
+  if (booking.status !== cfg.from) {
+    if (params.stage === "pickup") {
+      if (booking.status === "in_transit" || booking.status === "delivered") {
+        throw new ApiError("Pickup has already been confirmed for this booking.", 409);
+      }
+      throw new ApiError("This booking is not ready for pickup yet.", 409);
     }
-    throw new ApiError("This booking is not ready for pickup yet.", 409);
-  }
-  if (booking.handover?.pickupLocked) {
-    throw new ApiError(
-      "Too many incorrect attempts. Ask an admin to reset the pickup code.",
-      423,
-    );
-  }
-  if (!booking.handover?.pickupCode) {
-    await ensureHandoverCodes(booking);
-  }
-
-  const stored = booking.handover?.pickupCode;
-  const submitted = normalizeCode(params.code);
-  if (!stored || submitted.length !== 6 || submitted !== stored) {
-    await registerWrongAttempt(booking, "pickup");
-    throw new ApiError(
-      booking.handover?.pickupLocked
-        ? "Too many incorrect attempts. This code is now locked — contact an admin."
-        : "Incorrect pickup code. Please check with the sender and try again.",
-      booking.handover?.pickupLocked ? 423 : 400,
-    );
-  }
-
-  booking.handover.pickupCodeUsedAt = new Date();
-  booking.handover.pickupAttempts = 0;
-  await booking.save();
-
-  const updated = await changeBookingStatus({
-    bookingId: String(booking._id),
-    to: "in_transit",
-    note: "Pickup code verified by rider",
-    actorRole: "rider",
-    actorId: params.riderId,
-  });
-
-  await notifyAllAdmins(
-    updated,
-    "admin_pickup_confirmed",
-    `${updated.bookingReference} was picked up — pickup code verified by the rider.`,
-  );
-
-  return updated;
-}
-
-/** Rider confirms delivery by scanning/typing the receiver's code. */
-export async function confirmDelivery(params: {
-  bookingReference: string;
-  riderId: string;
-  code: string;
-}): Promise<BookingHydrated> {
-  await connectToDatabase();
-  const booking = await loadRiderJob(params.bookingReference, params.riderId, "deliveryCode");
-
-  if (booking.status !== "in_transit") {
-    if (booking.status === "delivered") {
-      throw new ApiError("This booking has already been marked delivered.", 409);
-    }
-    if (booking.status === "driver_assigned") {
-      throw new ApiError("Confirm pickup before confirming delivery.", 409);
-    }
+    if (booking.status === "delivered") throw new ApiError("This booking has already been marked delivered.", 409);
+    if (booking.status === "driver_assigned") throw new ApiError("Confirm pickup before confirming delivery.", 409);
     throw new ApiError("This booking is not out for delivery yet.", 409);
   }
-  if (booking.handover?.deliveryLocked) {
-    throw new ApiError(
-      "Too many incorrect attempts. Ask an admin to reset the delivery code.",
-      423,
-    );
+  if (booking.handover?.[cfg.lockedField]) {
+    throw new ApiError(`Too many incorrect attempts. Ask an admin to reset the ${cfg.word} code.`, 423);
   }
-  if (!booking.handover?.deliveryCode) {
+  if (!booking.handover?.[cfg.codeField]) {
     await ensureHandoverCodes(booking);
   }
 
-  const stored = booking.handover?.deliveryCode;
+  const stored = booking.handover?.[cfg.codeField];
   const submitted = normalizeCode(params.code);
   if (!stored || submitted.length !== 6 || submitted !== stored) {
-    await registerWrongAttempt(booking, "delivery");
+    await registerWrongAttempt(booking, params.stage);
+    const locked = booking.handover?.[cfg.lockedField];
     throw new ApiError(
-      booking.handover?.deliveryLocked
-        ? "Too many incorrect attempts. This code is now locked — contact an admin."
-        : "Incorrect delivery code. Please check with the receiver and try again.",
-      booking.handover?.deliveryLocked ? 423 : 400,
+      locked
+        ? "Too many incorrect attempts. This code is now locked, contact an admin."
+        : `Incorrect ${cfg.word} code. Please check with the ${cfg.owner} and try again.`,
+      locked ? 423 : 400,
     );
   }
 
-  booking.handover.deliveryCodeUsedAt = new Date();
-  booking.handover.deliveryAttempts = 0;
+  booking.handover[cfg.attemptsField] = 0;
   await booking.save();
 
-  const updated = await changeBookingStatus({
-    bookingId: String(booking._id),
-    to: "delivered",
-    note: "Delivery code verified by rider",
-    actorRole: "rider",
-    actorId: params.riderId,
+  const proofToken = await signProofToken({
+    sub: params.riderId,
+    ref: booking.bookingReference,
+    stage: params.stage,
   });
+  return { proofToken, expiresInSeconds: PROOF_TOKEN_TTL_SECONDS };
+}
 
-  await notifyAllAdmins(
-    updated,
-    "admin_delivery_confirmed",
-    `${updated.bookingReference} was delivered — delivery code verified by the rider.`,
+/** Step 2. The rider submits the proof token, a photo and their GPS fix. Only now is the
+ *  code consumed and the booking moved on. All admins are told, with a flag if the rider
+ *  was not near the booked address. */
+export async function confirmHandover(params: {
+  bookingReference: string;
+  riderId: string;
+  stage: Stage;
+  proofToken: string;
+  photos: string[];
+  location: LocationInput;
+}): Promise<BookingHydrated> {
+  await connectToDatabase();
+  const cfg = STAGE[params.stage];
+
+  const claims = await verifyProofToken(params.proofToken);
+  if (
+    !claims ||
+    claims.sub !== params.riderId ||
+    claims.stage !== params.stage ||
+    claims.ref !== params.bookingReference.toUpperCase()
+  ) {
+    throw new ApiError("Your code check has expired. Enter the code again.", 403);
+  }
+
+  // Validate the evidence before touching the booking.
+  if (params.photos.length < 1) throw new ApiError("Take a photo as proof before confirming.", 422);
+  if (params.photos.length > MAX_PROOF_PHOTOS) {
+    throw new ApiError(`You can attach at most ${MAX_PROOF_PHOTOS} photos.`, 422);
+  }
+  const photos = params.photos.map(parsePhoto);
+  const fix = checkLocation(params.location);
+
+  const booking = await Booking.findOne({ bookingReference: params.bookingReference.toUpperCase() });
+  if (!booking) throw new ApiError("Job not found.", 404);
+  if (!booking.assignedRider || String(booking.assignedRider) !== params.riderId) {
+    throw new ApiError("This job is not assigned to you.", 403);
+  }
+  if (booking.status !== cfg.from || booking.handover?.[cfg.usedField]) {
+    throw new ApiError(`The ${cfg.word} for this booking has already been confirmed.`, 409);
+  }
+
+  const rider = await User.findById(params.riderId).select("firstName lastName").lean();
+  const riderName = rider ? `${rider.firstName} ${rider.lastName}`.trim() : "The rider";
+  const target = params.stage === "pickup" ? booking.pickup : booking.destination;
+  const assessment = assessLocation(fix, target);
+
+  // Claim this step atomically so a double tap cannot confirm (or store evidence) twice.
+  const claim = await Booking.updateOne(
+    { _id: String(booking._id), status: cfg.from, [`handover.${cfg.usedField}`]: { $exists: false } },
+    { $set: { [`handover.${cfg.usedField}`]: new Date(), [`handover.${cfg.attemptsField}`]: 0 } },
   );
+  if (claim.modifiedCount === 0) {
+    throw new ApiError(`The ${cfg.word} for this booking has already been confirmed.`, 409);
+  }
 
-  // This rider just freed up. Give them (or anyone free) the next waiting booking.
-  void autoAssignPending();
+  let proofId: unknown;
+  try {
+    const proof = await saveProof({
+      bookingId: booking._id,
+      bookingReference: booking.bookingReference,
+      stage: params.stage,
+      riderId: params.riderId,
+      riderName,
+      photos,
+      fix,
+      assessment,
+    });
+    proofId = proof._id;
 
-  return updated;
+    const updated = await changeBookingStatus({
+      bookingId: String(booking._id),
+      to: cfg.to,
+      note: cfg.note,
+      actorRole: "rider",
+      actorId: params.riderId,
+    });
+
+    await alertAdminsOfHandover(updated, params.stage, riderName, assessment);
+    if (params.stage === "delivery") void autoAssignPending(); // this rider just freed up
+    return updated;
+  } catch (err) {
+    // Roll back so the rider can try again with the same code check.
+    if (proofId) await deleteProof(proofId);
+    await Booking.updateOne(
+      { _id: String(booking._id), status: cfg.from },
+      { $unset: { [`handover.${cfg.usedField}`]: "" } },
+    );
+    throw err;
+  }
+}
+
+async function alertAdminsOfHandover(
+  booking: BookingHydrated,
+  stage: Stage,
+  riderName: string,
+  a: { distanceFromTargetM?: number; flagged: boolean },
+) {
+  const what = stage === "pickup" ? "picked up" : "delivered";
+  const where = stage === "pickup" ? "pickup" : "delivery";
+  const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${m} m`);
+
+  if (a.flagged && a.distanceFromTargetM !== undefined) {
+    await notifyAllAdmins(
+      booking,
+      "admin_handover_flagged",
+      `Check ${booking.bookingReference}: ${riderName} confirmed the ${where} about ${km(a.distanceFromTargetM)} from the booked address. Open the booking to review the photo and GPS location.`,
+    );
+    return;
+  }
+  await notifyAllAdmins(
+    booking,
+    stage === "pickup" ? "admin_pickup_confirmed" : "admin_delivery_confirmed",
+    `${booking.bookingReference} was ${what} by ${riderName}. Code verified, photo and GPS location recorded${
+      a.distanceFromTargetM !== undefined ? ` (${km(a.distanceFromTargetM)} from the ${where} address)` : ""
+    }.`,
+  );
 }
 
 async function registerWrongAttempt(booking: BookingHydrated, stage: "pickup" | "delivery") {

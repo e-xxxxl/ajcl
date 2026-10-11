@@ -4,13 +4,15 @@ import { Booking, type BookingHydrated } from "../../models/Booking";
 import { User } from "../../models/User";
 import { changeBookingStatus } from "./booking";
 import { notify } from "../notifications";
+import { ApiError } from "../api";
 
 /**
  * Automatic rider allocation.
  *
  * A rider is eligible when their account is active, their vehicle type fits the
  * booking's vehicle (a rider with no vehicle type set takes any), and they hold
- * fewer than `RIDER_MAX_ACTIVE_JOBS` active jobs. Among eligible riders the one
+ * fewer active jobs than their own limit (set per rider by the admin, else
+ * `RIDER_MAX_ACTIVE_JOBS`). Among eligible riders the one
  * with the fewest active jobs wins; ties go to whoever was assigned least recently,
  * so work rotates evenly. When nobody is eligible the booking stays "confirmed" and
  * is picked up later by `autoAssignPending` (a rider frees up or is added), or
@@ -22,8 +24,25 @@ type RiderLean = {
   firstName: string;
   lastName: string;
   phone: string;
-  rider?: { plate?: string | null; vehicleType?: string | null; active?: boolean | null };
+  rider?: {
+    plate?: string | null;
+    vehicleType?: string | null;
+    active?: boolean | null;
+    maxActiveJobs?: number | null;
+  };
 };
+
+/** The most active orders this rider may hold: their own setting, else the server default. */
+export function riderLimit(r: Pick<RiderLean, "rider">): number {
+  return r.rider?.maxActiveJobs ?? env.riderMaxActiveJobs;
+}
+
+export async function countActiveJobs(riderId: unknown): Promise<number> {
+  return Booking.countDocuments({
+    assignedRider: String(riderId),
+    status: { $in: ACTIVE as never[] },
+  });
+}
 
 const ACTIVE = ["driver_assigned", "in_transit"];
 
@@ -77,7 +96,7 @@ export async function findBestRider(
       const s = byRider.get(String(r._id));
       return { rider: r, active: s?.active ?? 0, last: s?.last ? new Date(s.last).getTime() : 0 };
     })
-    .filter((c) => c.active < env.riderMaxActiveJobs)
+    .filter((c) => c.active < riderLimit(c.rider))
     .sort(
       (a, b) =>
         a.active - b.active ||
@@ -86,6 +105,102 @@ export async function findBestRider(
     );
 
   return candidates[0]?.rider ?? null;
+}
+
+/**
+ * Atomically give a confirmed, unassigned booking to a rider and move it to
+ * "driver assigned". Only one concurrent caller can win. Returns the updated
+ * booking, or null if someone else got there first.
+ */
+async function claimAndAssign(
+  bookingId: unknown,
+  rider: RiderLean,
+  who: { actorRole: "system" | "rider"; actorId?: string; note: string },
+): Promise<BookingHydrated | null> {
+  const claim = await Booking.updateOne(
+    { _id: String(bookingId), status: "confirmed", assignedRider: { $exists: false } },
+    {
+      $set: {
+        assignedRider: rider._id,
+        riderAssignedAt: new Date(),
+        assignedDriver: {
+          name: `${rider.firstName} ${rider.lastName}`.trim(),
+          phone: rider.phone,
+          plate: rider.rider?.plate ?? undefined,
+        },
+      },
+    },
+  );
+  if (claim.modifiedCount === 0) return null;
+
+  try {
+    const updated = await changeBookingStatus({
+      bookingId: String(bookingId),
+      to: "driver_assigned",
+      note: who.note,
+      actorRole: who.actorRole,
+      actorId: who.actorId,
+    });
+    await notify.riderJobAssigned(String(rider._id), updated);
+    return updated;
+  } catch (err) {
+    // Release the claim so the next sweep (or an admin) can try again.
+    await Booking.updateOne(
+      { _id: String(bookingId), status: "confirmed" },
+      { $unset: { assignedRider: "", assignedDriver: "", riderAssignedAt: "" } },
+    );
+    throw err;
+  }
+}
+
+/** True when a booking is paid, confirmed and nobody (rider account or hand-entered) has it. */
+export function isOpenForAssignment(b: {
+  status: string;
+  payment?: { status?: string | null } | null;
+  assignedRider?: unknown;
+  assignedDriver?: { name?: string | null; phone?: string | null } | null;
+}): boolean {
+  return (
+    b.status === "confirmed" &&
+    b.payment?.status === "paid" &&
+    !b.assignedRider &&
+    !b.assignedDriver?.name &&
+    !b.assignedDriver?.phone
+  );
+}
+
+/**
+ * A rider takes an open order for themselves (from "orders on your route").
+ * Enforces the same rules as auto-assign: active account, vehicle fits, under
+ * their own active-order limit. Throws a readable ApiError otherwise.
+ */
+export async function riderAcceptBooking(riderId: string, reference: string): Promise<BookingHydrated> {
+  await connectToDatabase();
+  const rider = (await User.findOne({ _id: riderId, role: "rider" }).lean()) as unknown as RiderLean | null;
+  if (!rider || rider.rider?.active === false) throw new ApiError("Your rider account is not active.", 403);
+
+  const booking = await Booking.findOne({ bookingReference: reference.toUpperCase() }).lean();
+  if (!booking || !isOpenForAssignment(booking)) {
+    throw new ApiError("This order is no longer available.", 409);
+  }
+  if (!riderFitsVehicle(rider.rider?.vehicleType, booking.vehicle ?? {})) {
+    throw new ApiError("This order needs a different vehicle from the one you ride.", 409);
+  }
+  const limit = riderLimit(rider);
+  if ((await countActiveJobs(rider._id)) >= limit) {
+    throw new ApiError(
+      `You already have ${limit} active order${limit === 1 ? "" : "s"}, the most you can hold. Finish one to accept another.`,
+      409,
+    );
+  }
+
+  const updated = await claimAndAssign(booking._id, rider, {
+    actorRole: "rider",
+    actorId: String(rider._id),
+    note: "Order accepted by the rider",
+  });
+  if (!updated) throw new ApiError("Another rider just took this order.", 409);
+  return updated;
 }
 
 /**
@@ -107,40 +222,10 @@ export async function autoAssignBooking(bookingId: string): Promise<BookingHydra
     const rider = await findBestRider(booking);
     if (!rider) return null;
 
-    // Claim the booking. Only one concurrent caller can win this update.
-    const claim = await Booking.updateOne(
-      { _id: booking._id, status: "confirmed", assignedRider: { $exists: false } },
-      {
-        $set: {
-          assignedRider: rider._id,
-          riderAssignedAt: new Date(),
-          assignedDriver: {
-            name: `${rider.firstName} ${rider.lastName}`.trim(),
-            phone: rider.phone,
-            plate: rider.rider?.plate ?? undefined,
-          },
-        },
-      },
-    );
-    if (claim.modifiedCount === 0) return null;
-
-    try {
-      const updated = await changeBookingStatus({
-        bookingId: String(booking._id),
-        to: "driver_assigned",
-        note: "Rider assigned automatically",
-        actorRole: "system",
-      });
-      await notify.riderJobAssigned(String(rider._id), updated);
-      return updated;
-    } catch (err) {
-      // Release the claim so the next sweep (or an admin) can try again.
-      await Booking.updateOne(
-        { _id: booking._id, status: "confirmed" },
-        { $unset: { assignedRider: "", assignedDriver: "", riderAssignedAt: "" } },
-      );
-      throw err;
-    }
+    return await claimAndAssign(booking._id, rider, {
+      actorRole: "system",
+      note: "Rider assigned automatically",
+    });
   } catch (err) {
     console.error("[autoassign] failed for", bookingId, err instanceof Error ? err.message : err);
     return null;

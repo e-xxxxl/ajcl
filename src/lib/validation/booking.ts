@@ -8,6 +8,11 @@ export const locationSchema = z.object({
   placeId: z.string().trim().max(300).optional(),
   label: z.string().trim().max(120).optional(),
   manual: z.boolean().optional().default(false),
+  details: z.string().trim().max(300).optional(),
+  name: z.string().trim().max(160).optional(),
+  area: z.string().trim().max(120).optional(),
+  city: z.string().trim().max(120).optional(),
+  state: z.string().trim().max(120).optional(),
 });
 
 export type LocationInput = z.infer<typeof locationSchema>;

@@ -118,6 +118,12 @@ function bookingHref(ref: string) {
   return `/dashboard/bookings/${ref}`;
 }
 
+export type AdminAlertKind =
+  | "admin_pickup_confirmed"
+  | "admin_delivery_confirmed"
+  | "admin_code_locked"
+  | "admin_handover_flagged";
+
 export const notify = {
   async bookingCreated(userId: string, booking: BookingLike, contact?: { email?: string; phone?: string }) {
     return dispatch({
@@ -239,13 +245,14 @@ export const notify = {
   async adminAlert(
     adminUserId: string,
     booking: BookingLike,
-    kind: "admin_pickup_confirmed" | "admin_delivery_confirmed" | "admin_code_locked",
+    kind: AdminAlertKind,
     body: string,
   ) {
     const titles: Record<typeof kind, string> = {
       admin_pickup_confirmed: "Package picked up",
       admin_delivery_confirmed: "Package delivered",
       admin_code_locked: "Handover code locked",
+      admin_handover_flagged: "Check handover location",
     };
     return dispatch({
       userId: adminUserId,
@@ -262,7 +269,7 @@ export const notify = {
 /** Fan a notification out to every admin account. Never throws. */
 export async function notifyAllAdmins(
   booking: BookingLike,
-  kind: "admin_pickup_confirmed" | "admin_delivery_confirmed" | "admin_code_locked",
+  kind: AdminAlertKind,
   body: string,
 ): Promise<void> {
   try {

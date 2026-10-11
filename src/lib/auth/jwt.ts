@@ -38,6 +38,39 @@ export async function signSession(
     .sign(secret);
 }
 
+export type ProofClaims = { sub: string; ref: string; stage: "pickup" | "delivery" };
+const PROOF_TTL_SECONDS = 15 * 60;
+export const PROOF_TOKEN_TTL_SECONDS = PROOF_TTL_SECONDS;
+
+/** Issued once a rider's handover code checks out. It is the only way to reach the
+ *  final confirm step, so the code can't be skipped. Not a login session (no role). */
+export async function signProofToken(claims: ProofClaims): Promise<string> {
+  return new SignJWT({ typ: "handover-proof", ref: claims.ref, stage: claims.stage } as JWTPayload)
+    .setProtectedHeader({ alg: ALG })
+    .setIssuer(ISSUER)
+    .setSubject(claims.sub)
+    .setIssuedAt()
+    .setExpirationTime(Math.floor(Date.now() / 1000) + PROOF_TTL_SECONDS)
+    .sign(secret);
+}
+
+export async function verifyProofToken(token: string): Promise<ProofClaims | null> {
+  try {
+    const { payload } = await jwtVerify(token, secret, { issuer: ISSUER });
+    if (
+      payload.typ === "handover-proof" &&
+      typeof payload.sub === "string" &&
+      typeof payload.ref === "string" &&
+      (payload.stage === "pickup" || payload.stage === "delivery")
+    ) {
+      return { sub: payload.sub, ref: payload.ref, stage: payload.stage };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function verifySession(token: string): Promise<SessionClaims | null> {
   try {
     const { payload } = await jwtVerify(token, secret, { issuer: ISSUER });

@@ -20,8 +20,12 @@ import { changeBookingStatus } from "../lib/services/booking";
 import { activeUnitsBySlug } from "../lib/services/fleet";
 import { assignRiderToBooking, resetHandoverLock } from "../lib/services/rider";
 import { findBestRider, autoAssignPending } from "../lib/services/autoassign";
+import { listProofs, getPhoto, toProofDTO } from "../lib/services/proof";
+import { HandoverProof } from "../models/HandoverProof";
+import { ProofPhoto } from "../models/ProofPhoto";
 import { vehicleUpsertSchema, vehiclePatchSchema } from "../lib/validation/vehicle";
 import { slugify } from "../lib/utils";
+import { env } from "../lib/env";
 import { BOOKING_STATUS_FLOW, type BookingStatus } from "../config/booking";
 
 export const adminRouter = Router();
@@ -80,18 +84,23 @@ adminRouter.get(
     requireAdmin(req);
     await connectToDatabase();
 
-    const [stats, recent] = await Promise.all([
+    const [stats, recent, proofs] = await Promise.all([
       getAdminStats(),
       Booking.find({})
         .sort({ createdAt: -1 })
         .limit(8)
         .populate("user", "firstName lastName email phone")
         .lean(),
+      HandoverProof.find({}).sort({ createdAt: -1 }).limit(8).lean(),
     ]);
 
     return ok(res, {
       stats,
       recent: recent.map((b) => serializeBooking(b, { includeCustomer: true })),
+      recentProofs: proofs.map((p) => ({
+        ...toProofDTO(p as never, true),
+        bookingReference: p.bookingReference,
+      })),
     });
   }),
 );
@@ -139,13 +148,15 @@ adminRouter.get(
       .lean();
     if (!booking) throw new ApiError("Booking not found.", 404);
 
-    const [audit, payments] = await Promise.all([
+    const [audit, payments, proofs] = await Promise.all([
       StatusHistory.find({ booking: booking._id }).sort({ at: -1 }).lean(),
       Payment.find({ booking: booking._id }).sort({ createdAt: -1 }).lean(),
+      listProofs(booking._id, true),
     ]);
 
     return ok(res, {
       booking: serializeBooking(booking, { includeCustomer: true }),
+      proofs,
       audit: audit.map((a) => ({
         id: String(a._id),
         fromStatus: a.fromStatus ?? null,
@@ -168,6 +179,27 @@ adminRouter.get(
         createdAt: new Date(p.createdAt as unknown as string).toISOString(),
       })),
     });
+  }),
+);
+
+/** GET /api/admin/bookings/:reference/photos/:photoId: one proof photo (image bytes). */
+adminRouter.get(
+  "/bookings/:reference/photos/:photoId",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+    const booking = await Booking.findOne({
+      bookingReference: req.params.reference.toUpperCase(),
+    })
+      .select("_id")
+      .lean();
+    if (!booking) throw new ApiError("Booking not found.", 404);
+    const photo = await getPhoto(booking._id, req.params.photoId);
+    if (!photo) throw new ApiError("Photo not found.", 404);
+    res.setHeader("Content-Type", photo.contentType);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(photo.data);
   }),
 );
 
@@ -357,6 +389,8 @@ async function hardDeleteBookings(filter: Record<string, unknown>): Promise<numb
   const ids = bookings.map((b) => b._id);
   if (ids.length === 0) return 0;
   await Promise.all([
+    HandoverProof.deleteMany({ booking: { $in: ids } }),
+    ProofPhoto.deleteMany({ booking: { $in: ids } }),
     Payment.deleteMany({ booking: { $in: ids } }),
     StatusHistory.deleteMany({ booking: { $in: ids } }),
     Notification.deleteMany({ booking: { $in: ids } }),
@@ -509,6 +543,8 @@ const createRiderSchema = z.object({
     .max(20, "Enter a valid phone number"),
   plate: z.string().trim().max(20).optional().default(""),
   vehicleType: z.string().trim().max(60).optional().default(""),
+  /** Most active orders this rider can hold at once. Blank = the server default. */
+  maxActiveJobs: z.number().int().min(1, "At least 1").max(50, "At most 50").optional(),
   password: z
     .string()
     .min(8, "Use at least 8 characters")
@@ -524,6 +560,7 @@ const riderPatchSchema = z.object({
   phone: z.string().trim().min(7).max(20).optional(),
   plate: z.string().trim().max(20).optional(),
   vehicleType: z.string().trim().max(60).optional(),
+  maxActiveJobs: z.number().int().min(1, "At least 1").max(50, "At most 50").nullable().optional(),
   active: z.boolean().optional(),
   password: z
     .string()
@@ -541,7 +578,7 @@ type RiderLean = {
   lastName: string;
   email: string;
   phone: string;
-  rider?: { plate?: string; vehicleType?: string; active?: boolean };
+  rider?: { plate?: string; vehicleType?: string; active?: boolean; maxActiveJobs?: number | null };
   lastLoginAt?: Date | null;
   createdAt?: Date | string;
 };
@@ -565,6 +602,7 @@ async function serializeRider(u: RiderLean) {
     plate: u.rider?.plate || undefined,
     vehicleType: u.rider?.vehicleType || undefined,
     active: u.rider?.active !== false,
+    maxActiveJobs: u.rider?.maxActiveJobs ?? env.riderMaxActiveJobs,
     activeJobs,
     completedJobs,
     lastLoginAt: u.lastLoginAt ? new Date(u.lastLoginAt).toISOString() : null,
@@ -602,7 +640,12 @@ adminRouter.post(
       phone: input.phone,
       passwordHash: await hashPassword(input.password),
       role: "rider",
-      rider: { plate: input.plate || undefined, vehicleType: input.vehicleType || undefined, active: true },
+      rider: {
+        plate: input.plate || undefined,
+        vehicleType: input.vehicleType || undefined,
+        maxActiveJobs: input.maxActiveJobs,
+        active: true,
+      },
     });
     console.info(`[admin] ${me.email} created rider ${input.email}`);
 
@@ -629,16 +672,26 @@ adminRouter.patch(
     if (input.phone !== undefined) rider.phone = input.phone;
     if (input.password) rider.passwordHash = await hashPassword(input.password);
 
-    const currentRider = (rider as unknown as { rider?: { plate?: string; vehicleType?: string; active?: boolean } }).rider ?? {};
+    const currentRider =
+      (rider as unknown as {
+        rider?: { plate?: string; vehicleType?: string; active?: boolean; maxActiveJobs?: number };
+      }).rider ?? {};
     rider.set("rider", {
       plate: input.plate !== undefined ? input.plate : currentRider.plate,
       vehicleType: input.vehicleType !== undefined ? input.vehicleType : currentRider.vehicleType,
       active: input.active !== undefined ? input.active : currentRider.active !== false,
+      // null clears their own limit (back to the server default); a number sets it.
+      maxActiveJobs:
+        input.maxActiveJobs === undefined
+          ? currentRider.maxActiveJobs
+          : (input.maxActiveJobs ?? undefined),
     });
     await rider.save();
 
     // A re-activated rider, or a changed vehicle type, may unlock waiting bookings.
-    if (input.active === true || input.vehicleType !== undefined) void autoAssignPending();
+    if (input.active === true || input.vehicleType !== undefined || input.maxActiveJobs !== undefined) {
+      void autoAssignPending();
+    }
 
     return ok(res, { rider: await serializeRider(rider.toObject() as RiderLean) });
   }),

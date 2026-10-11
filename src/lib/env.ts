@@ -49,6 +49,13 @@ export const env = {
   /** A rider already holding this many active jobs is skipped by auto-assignment. */
   riderMaxActiveJobs: Math.max(1, Number(get("RIDER_MAX_ACTIVE_JOBS")) || 3),
 
+  /** An open order is shown to a rider as "on your route" when it adds at most this many km. */
+  routeDetourKm: Math.max(1, Number(get("ROUTE_DETOUR_KM")) || 6),
+
+  /** A handover is flagged for the admin when the rider's GPS fix is further than this
+   *  (metres, beyond the fix's own accuracy) from the booked address. */
+  proofRadiusM: Math.max(50, Number(get("PROOF_RADIUS_M")) || 300),
+
   /** Resend transactional email. */
   resendApiKey: get("RESEND_API_KEY"),
   /** "Name <address@domain>" — the sender address must be on a Resend-verified domain. */

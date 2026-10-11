@@ -9,8 +9,17 @@ import { signSession, SESSION_MAX_AGE_SECONDS, SHORT_SESSION_MAX_AGE_SECONDS } f
 import { enforceRateLimit } from "../lib/rate-limit";
 import { User } from "../models/User";
 import { Booking } from "../models/Booking";
-import { serializeBooking } from "../lib/serialize";
-import { confirmPickup, confirmDelivery } from "../lib/services/rider";
+import { serializeRiderJob } from "../lib/serialize";
+import { verifyHandoverCode, confirmHandover } from "../lib/services/rider";
+import {
+  riderAcceptBooking,
+  riderFitsVehicle,
+  riderLimit,
+  isOpenForAssignment,
+} from "../lib/services/autoassign";
+import { planRoute, detourFor, pointOf, haversineKm, ROAD_FACTOR, type PlannerJob } from "../lib/services/route-plan";
+import { env } from "../lib/env";
+import type { RiderRouteDTO } from "../types";
 
 export const riderRouter = Router();
 
@@ -123,7 +132,7 @@ riderRouter.get(
       .limit(200)
       .lean();
 
-    return ok(res, { jobs: bookings.map((b) => serializeBooking(b)) });
+    return ok(res, { jobs: bookings.map((b) => serializeRiderJob(b)) });
   }),
 );
 
@@ -141,7 +150,7 @@ riderRouter.get(
       throw new ApiError("Job not found.", 404);
     }
 
-    return ok(res, { job: serializeBooking(booking) });
+    return ok(res, { job: serializeRiderJob(booking) });
   }),
 );
 
@@ -153,38 +162,178 @@ const codeSchema = z.object({
     .max(12, "Enter the 6-digit code"),
 });
 
-/** POST /api/rider/jobs/:reference/pickup — confirm pickup with the sender's code. */
-riderRouter.post(
-  "/jobs/:reference/pickup",
+const photoSchema = z.string().min(100).max(1_200_000);
+
+const locationSchema = z.object({
+  lat: z.number().gte(-90).lte(90),
+  lng: z.number().gte(-180).lte(180),
+  accuracyM: z.number().min(0).max(100_000).optional(),
+  /** Age of the GPS fix in ms, measured on the device. */
+  ageMs: z.number().min(0).max(24 * 3600 * 1000),
+});
+
+const confirmSchema = z.object({
+  proofToken: z.string().min(20).max(2000),
+  photos: z.array(photoSchema).min(1, "Take a photo as proof").max(2),
+  location: locationSchema,
+});
+
+/** POST /api/rider/jobs/:reference/pickup/verify and /deliver/verify
+ *  Step 1: check the sender's / receiver's code. Returns a short-lived token for step 2. */
+for (const stage of ["pickup", "delivery"] as const) {
+  const path = stage === "pickup" ? "pickup" : "deliver";
+
+  riderRouter.post(
+    `/jobs/:reference/${path}/verify`,
+    asyncHandler(async (req, res) => {
+      const session = requireRider(req);
+      enforceRateLimit(req, `rider-${path}-verify`, { limit: 30, windowMs: 10 * 60 * 1000 });
+      const { code } = parse(codeSchema, req.body);
+
+      const result = await verifyHandoverCode({
+        bookingReference: req.params.reference,
+        riderId: session.sub,
+        stage,
+        code,
+      });
+      return ok(res, result);
+    }),
+  );
+
+  /** POST /api/rider/jobs/:reference/pickup and /deliver
+   *  Step 2: submit the proof token, a photo and the GPS fix. Confirms the handover. */
+  riderRouter.post(
+    `/jobs/:reference/${path}`,
+    asyncHandler(async (req, res) => {
+      const session = requireRider(req);
+      enforceRateLimit(req, `rider-${path}`, { limit: 20, windowMs: 10 * 60 * 1000 });
+      const input = parse(confirmSchema, req.body);
+
+      const updated = await confirmHandover({
+        bookingReference: req.params.reference,
+        riderId: session.sub,
+        stage,
+        proofToken: input.proofToken,
+        photos: input.photos,
+        location: input.location,
+      });
+      return ok(res, { job: serializeRiderJob(updated.toObject()) });
+    }),
+  );
+}
+
+/** GET /api/rider/route?lat=&lng= : the rider's active jobs in one efficient order,
+ *  plus open orders that fit that route (and can be accepted). Location is optional. */
+riderRouter.get(
+  "/route",
   asyncHandler(async (req, res) => {
     const session = requireRider(req);
-    enforceRateLimit(req, "rider-pickup", { limit: 30, windowMs: 10 * 60 * 1000 });
-    const { code } = parse(codeSchema, req.body);
+    await connectToDatabase();
 
-    const updated = await confirmPickup({
-      bookingReference: req.params.reference,
-      riderId: session.sub,
-      code,
-    });
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    const origin =
+      Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+        ? { lat, lng }
+        : null;
 
-    return ok(res, { job: serializeBooking(updated.toObject()) });
+    const [riderDoc, jobs] = await Promise.all([
+      User.findById(session.sub).lean(),
+      Booking.find({
+        assignedRider: session.sub,
+        status: { $in: ["driver_assigned", "in_transit"] },
+      }).lean(),
+    ]);
+    if (!riderDoc) throw new ApiError("Account not found.", 404);
+    const rider = riderDoc as unknown as Parameters<typeof riderLimit>[0] & {
+      rider?: { vehicleType?: string | null };
+    };
+
+    const plan = planRoute(jobs as unknown as PlannerJob[], origin);
+    const maxActive = riderLimit(rider);
+    const activeCount = jobs.length;
+
+    // Points the rider will pass through, in order (their position first, if known).
+    const path = [origin, ...plan.stops.map((st) => pointOf(st.location))].filter(
+      (p): p is { lat: number; lng: number } => p !== null,
+    );
+
+    const nearby: RiderRouteDTO["nearby"] = [];
+    if (path.length > 0) {
+      const open = await Booking.find({
+        status: "confirmed",
+        "payment.status": "paid",
+        assignedRider: { $exists: false },
+        "assignedDriver.name": { $exists: false },
+        scheduledAt: { $gte: new Date(Date.now() - 6 * 60 * 60 * 1000) },
+      })
+        .sort({ scheduledAt: 1 })
+        .limit(100)
+        .lean();
+
+      const onRoute = plan.stops.length > 0;
+      for (const b of open) {
+        if (!isOpenForAssignment(b)) continue;
+        if (!riderFitsVehicle(rider.rider?.vehicleType, b.vehicle ?? {})) continue;
+        const p = pointOf(b.pickup);
+        const d = pointOf(b.destination);
+        if (!p || !d) continue;
+
+        // Already carrying jobs: how much would this add to the route? Nothing on the
+        // go yet: how far is the pickup from where the rider is?
+        const extra = onRoute
+          ? detourFor(path, p, d)
+          : origin
+            ? Math.round(haversineKm(origin, p) * ROAD_FACTOR * 10) / 10
+            : null;
+        if (extra === null || extra > env.routeDetourKm) continue;
+        nearby.push({
+          job: serializeRiderJob(b),
+          extraKm: extra,
+          mode: onRoute ? "on_route" : "near_you",
+        });
+      }
+      nearby.sort((a, b) => a.extraKm - b.extraKm);
+      nearby.splice(10);
+    }
+
+    const payload: RiderRouteDTO = {
+      route: {
+        stops: plan.stops.map((st) => ({
+          ...st,
+          location: {
+            formattedAddress: st.location.formattedAddress,
+            details: st.location.details ?? undefined,
+            name: st.location.name ?? undefined,
+            area: st.location.area ?? undefined,
+            city: st.location.city ?? undefined,
+            state: st.location.state ?? undefined,
+            lat: st.location.lat ?? undefined,
+            lng: st.location.lng ?? undefined,
+          },
+        })),
+        totalKm: plan.totalKm,
+        mapsUrl: plan.mapsUrl,
+      },
+      nearby,
+      needsLocation: path.length === 0,
+      usedLocation: Boolean(origin),
+      activeCount,
+      maxActive,
+      canAccept: activeCount < maxActive,
+      maxDetourKm: env.routeDetourKm,
+    };
+    return ok(res, payload);
   }),
 );
 
-/** POST /api/rider/jobs/:reference/deliver — confirm delivery with the receiver's code. */
+/** POST /api/rider/jobs/:reference/accept : take an open order for yourself. */
 riderRouter.post(
-  "/jobs/:reference/deliver",
+  "/jobs/:reference/accept",
   asyncHandler(async (req, res) => {
     const session = requireRider(req);
-    enforceRateLimit(req, "rider-deliver", { limit: 30, windowMs: 10 * 60 * 1000 });
-    const { code } = parse(codeSchema, req.body);
-
-    const updated = await confirmDelivery({
-      bookingReference: req.params.reference,
-      riderId: session.sub,
-      code,
-    });
-
-    return ok(res, { job: serializeBooking(updated.toObject()) });
+    enforceRateLimit(req, "rider-accept", { limit: 20, windowMs: 10 * 60 * 1000 });
+    const updated = await riderAcceptBooking(session.sub, req.params.reference);
+    return ok(res, { job: serializeRiderJob(updated.toObject()) });
   }),
 );

@@ -34,6 +34,9 @@ app.use(
 // The Paystack webhook needs the raw body for HMAC verification — must come
 // BEFORE express.json().
 app.use("/api/payments/webhook", express.raw({ type: "*/*" }));
+// Proof photos arrive as base64 on the rider's pickup/delivery confirm calls. Give only
+// those two routes a bigger body; everything else stays at 1 MB.
+app.use(/^\/api\/rider\/jobs\/[^/]+\/(pickup|deliver)$/, express.json({ limit: "3mb" }));
 app.use(express.json({ limit: "1mb" }));
 
 // Bearer token → req.session (never throws).

@@ -65,6 +65,15 @@ export function errorHandler(
   }
   if (err instanceof ApiError) return fail(err.message, err.status, err.details);
 
+  // Body-parser problems: a body over the size limit, or malformed JSON.
+  const bodyErr = err as { type?: string; status?: number };
+  if (bodyErr?.type === "entity.too.large") {
+    return fail("That upload is too large. Use a smaller photo and try again.", 413);
+  }
+  if (bodyErr?.type === "entity.parse.failed") {
+    return fail("The request couldn't be read. Please try again.", 400);
+  }
+
   // Mongo duplicate key
   if (
     typeof err === "object" &&

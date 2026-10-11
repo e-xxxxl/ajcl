@@ -1,7 +1,7 @@
 import type { BookingDoc } from "../models/Booking";
 import type { VehicleDoc } from "../models/Vehicle";
 import type { NotificationDoc } from "../models/Notification";
-import type { BookingDTO, NotificationDTO, VehicleDTO } from "../types";
+import type { BookingDTO, NotificationDTO, RiderJobDTO, VehicleDTO } from "../types";
 
 type Lean<T> = T & { _id: unknown; createdAt?: Date; updatedAt?: Date };
 
@@ -41,6 +41,11 @@ export function serializeBooking(
           placeId: l.placeId ?? undefined,
           label: l.label ?? undefined,
           manual: l.manual ?? undefined,
+          details: l.details ?? undefined,
+          name: l.name ?? undefined,
+          area: l.area ?? undefined,
+          city: l.city ?? undefined,
+          state: l.state ?? undefined,
         }
       : { formattedAddress: "" };
 
@@ -143,6 +148,16 @@ export function serializeBooking(
   }
 
   return dto;
+}
+
+/** What a rider may see of a booking: no pricing, payment, customer account or codes. */
+export function serializeRiderJob(b: Lean<BookingDoc>): RiderJobDTO {
+  const { pricing, payment, customer, pickupCode, trackingUrl, vehicle, ...rest } = serializeBooking(b);
+  void pricing, payment, customer, pickupCode, trackingUrl;
+  return {
+    ...rest,
+    vehicle: { vehicleId: vehicle.vehicleId, slug: vehicle.slug, name: vehicle.name, image: vehicle.image },
+  };
 }
 
 export function serializeNotification(n: Lean<NotificationDoc>): NotificationDTO {

@@ -12,7 +12,7 @@ export type SessionUser = {
   role: "customer" | "admin" | "rider";
   superAdmin?: boolean;
   /** Only present when role === "rider". */
-  rider?: { plate?: string; vehicleType?: string; active: boolean };
+  rider?: { plate?: string; vehicleType?: string; active: boolean; maxActiveJobs?: number };
 };
 
 export type RiderAccountDTO = {
@@ -25,6 +25,8 @@ export type RiderAccountDTO = {
   plate?: string;
   vehicleType?: string;
   active: boolean;
+  /** Effective limit: the rider's own setting, or the server default. */
+  maxActiveJobs: number;
   activeJobs: number;
   completedJobs: number;
   lastLoginAt: string | null;
@@ -55,6 +57,12 @@ export type LocationDTO = {
   placeId?: string;
   label?: string;
   manual?: boolean;
+  /** House/flat number, floor, landmark, gate instructions. */
+  details?: string;
+  name?: string;
+  area?: string;
+  city?: string;
+  state?: string;
 };
 
 export type PriceBreakdownDTO = {
@@ -153,6 +161,59 @@ export type BookingDTO = {
   createdAt: string;
   updatedAt: string;
   customer?: { id: string; fullName: string; email: string; phone: string };
+};
+
+
+/** A booking as a rider sees it: addresses, contacts and package. No prices, payment or codes. */
+export type RiderJobDTO = Omit<
+  BookingDTO,
+  "pricing" | "payment" | "customer" | "pickupCode" | "trackingUrl" | "vehicle"
+> & {
+  vehicle: { vehicleId: string; slug: string; name: string; image?: string };
+};
+
+export type RouteStopDTO = {
+  jobRef: string;
+  kind: "pickup" | "stop" | "dropoff" | "return";
+  label: string;
+  location: LocationDTO;
+  /** Approx. road km from the previous stop (or the rider). null = unknown. */
+  legKm: number | null;
+  cumulativeKm: number;
+  scheduledAt?: string;
+};
+
+export type RiderRouteDTO = {
+  route: { stops: RouteStopDTO[]; totalKm: number; mapsUrl: string | null };
+  /** Open orders that fit the rider's route (or sit near them, when they have no active jobs). */
+  nearby: Array<{ job: RiderJobDTO; extraKm: number; mode: "on_route" | "near_you" }>;
+  /** True when there is nothing to measure against: no active jobs and no location shared. */
+  needsLocation: boolean;
+  usedLocation: boolean;
+  activeCount: number;
+  maxActive: number;
+  canAccept: boolean;
+  maxDetourKm: number;
+};
+
+
+/** Evidence a rider captured at pickup or delivery. Location is for admins only. */
+export type ProofDTO = {
+  id: string;
+  stage: "pickup" | "delivery";
+  riderName?: string;
+  /** When the rider's device captured the fix. */
+  takenAt: string;
+  photoIds: string[];
+  location?: {
+    lat: number;
+    lng: number;
+    accuracyM?: number;
+    /** Metres from the booked address. */
+    distanceFromTargetM?: number;
+    /** True when the rider was well outside the radius around the booked address. */
+    flagged: boolean;
+  };
 };
 
 /** Public, no-login payload for the receiver's tracking page (GET /api/track/:token). */

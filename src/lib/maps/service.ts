@@ -1,5 +1,6 @@
 import { env } from "../env";
 import { MAPS_CONFIG, FALLBACK_AVERAGE_SPEED_KMH } from "../../config/maps";
+import { composeAddress, type AddressParts } from "./address";
 
 export type LatLng = { lat: number; lng: number };
 
@@ -10,9 +11,8 @@ export type AutocompletePrediction = {
   fullText: string;
 };
 
-export type ResolvedPlace = {
+export type ResolvedPlace = AddressParts & {
   placeId: string;
-  formattedAddress: string;
   location: LatLng;
 };
 
@@ -133,7 +133,7 @@ export async function placeDetails(
   const res = await fetch(url, {
     headers: {
       "X-Goog-Api-Key": env.googleMapsServerKey as string,
-      "X-Goog-FieldMask": "id,formattedAddress,location",
+      "X-Goog-FieldMask": "id,formattedAddress,location,displayName,addressComponents",
     },
   });
 
@@ -149,12 +149,19 @@ export async function placeDetails(
     id: string;
     formattedAddress?: string;
     location?: { latitude: number; longitude: number };
+    displayName?: { text?: string };
+    addressComponents?: { longText?: string; types?: string[] }[];
   };
 
   if (!json.location) return null;
+  const parts = composeAddress({
+    formattedAddress: json.formattedAddress ?? "",
+    displayName: json.displayName?.text,
+    components: (json.addressComponents ?? []).map((c) => ({ longText: c.longText ?? "", types: c.types ?? [] })),
+  });
   return {
     placeId: json.id,
-    formattedAddress: json.formattedAddress ?? "",
+    ...parts,
     location: { lat: json.location.latitude, lng: json.location.longitude },
   };
 }

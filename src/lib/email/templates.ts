@@ -235,17 +235,26 @@ const EVENTS: Partial<Record<NotificationType, (ctx: EventCtx) => EventContent>>
     ],
     cta: { label: "View job", href: `/rider` },
   }),
-  admin_pickup_confirmed: ({ ref }) => ({
-    subject: `Picked up — ${ref}`,
+  admin_pickup_confirmed: ({ ref, body }) => ({
+    subject: `Picked up: ${ref}`,
     heading: "Package picked up",
-    paragraphs: [`The pickup code for ${ref} was verified and the rider has collected the package.`],
+    paragraphs: [body || `The pickup code for ${ref} was verified and the rider has collected the package.`],
     cta: { label: "Open in admin", href: `/admin/bookings/${ref}` },
   }),
-  admin_delivery_confirmed: ({ ref }) => ({
-    subject: `Delivered — ${ref}`,
+  admin_delivery_confirmed: ({ ref, body }) => ({
+    subject: `Delivered: ${ref}`,
     heading: "Package delivered",
-    paragraphs: [`The delivery code for ${ref} was verified and the package has been handed over.`],
+    paragraphs: [body || `The delivery code for ${ref} was verified and the package has been handed over.`],
     cta: { label: "Open in admin", href: `/admin/bookings/${ref}` },
+  }),
+  admin_handover_flagged: ({ ref, body }) => ({
+    subject: `Check handover location: ${ref}`,
+    heading: "Handover location needs a check",
+    paragraphs: [
+      body || `The rider confirmed a handover for ${ref} away from the booked address.`,
+      "The photo and the rider's GPS position are saved on the booking.",
+    ],
+    cta: { label: "Review photo and location", href: `/admin/bookings/${ref}` },
   }),
   admin_code_locked: ({ ref }) => ({
     subject: `Action needed — ${ref} handover code locked`,

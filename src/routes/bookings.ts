@@ -12,6 +12,7 @@ import { buildQuote } from "../lib/services/quote";
 import { createBooking, changeBookingStatus } from "../lib/services/booking";
 import { serializeBooking } from "../lib/serialize";
 import { Booking } from "../models/Booking";
+import { listProofs, getPhoto } from "../lib/services/proof";
 
 export const bookingsRouter = Router();
 
@@ -88,7 +89,32 @@ bookingsRouter.get(
 
     // Only the booking's own customer ever sees the pickup code — never admin/rider.
     const isOwner = String(booking.user) === session.sub;
-    return ok(res, { booking: serializeBooking(booking, { includePickupCode: isOwner }) });
+    // Photos and times only. The rider's GPS position is for admins.
+    const proofs = await listProofs(booking._id, false);
+    return ok(res, { booking: serializeBooking(booking, { includePickupCode: isOwner }), proofs });
+  }),
+);
+
+/** GET /api/bookings/:reference/photos/:photoId: a proof photo for the booking's own customer. */
+bookingsRouter.get(
+  "/:reference/photos/:photoId",
+  asyncHandler(async (req, res) => {
+    const session = requireSession(req);
+    await connectToDatabase();
+    const booking = await Booking.findOne({
+      bookingReference: req.params.reference.toUpperCase(),
+    })
+      .select("_id user")
+      .lean();
+    if (!booking || (String(booking.user) !== session.sub && session.role !== "admin")) {
+      throw new ApiError("Photo not found.", 404);
+    }
+    const photo = await getPhoto(booking._id, req.params.photoId);
+    if (!photo) throw new ApiError("Photo not found.", 404);
+    res.setHeader("Content-Type", photo.contentType);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(photo.data);
   }),
 );
 

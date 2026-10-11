@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { verifySession, type SessionClaims } from "./jwt";
 import { connectToDatabase } from "../db";
 import { User } from "../../models/User";
+import { env } from "../env";
 import type { SessionUser } from "../../types";
 
 export class UnauthorizedError extends Error {
@@ -85,7 +86,7 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
     const u = user as unknown as {
       role: string;
       superAdmin?: boolean;
-      rider?: { plate?: string; vehicleType?: string; active?: boolean };
+      rider?: { plate?: string; vehicleType?: string; active?: boolean; maxActiveJobs?: number };
     };
     return {
       id: String(user._id),
@@ -98,7 +99,12 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
       superAdmin: Boolean(u.superAdmin),
       rider:
         u.role === "rider"
-          ? { plate: u.rider?.plate, vehicleType: u.rider?.vehicleType, active: u.rider?.active !== false }
+          ? {
+              plate: u.rider?.plate,
+              vehicleType: u.rider?.vehicleType,
+              active: u.rider?.active !== false,
+              maxActiveJobs: u.rider?.maxActiveJobs ?? env.riderMaxActiveJobs,
+            }
           : undefined,
     };
   } catch {

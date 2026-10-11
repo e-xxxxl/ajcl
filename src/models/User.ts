@@ -24,6 +24,8 @@ const userSchema = new Schema(
       vehicleType: { type: String, trim: true, maxlength: 60 },
       /** Inactive riders can't log in or receive new jobs. */
       active: { type: Boolean, default: true },
+      /** Most active orders this rider may hold at once. Unset = the server default. */
+      maxActiveJobs: { type: Number, min: 1, max: 50 },
     },
     /** Password reset flow. */
     resetTokenHash: { type: String, select: false },
