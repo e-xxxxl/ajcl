@@ -41,7 +41,10 @@ async function senderAddresses(booking: {
  * keep it private until the rider is physically there. Sent at most once per
  * booking. Never throws.
  */
-export async function sendConfirmationEmails(booking: BookingHydrated): Promise<void> {
+export async function sendConfirmationEmails(
+  booking: BookingHydrated,
+  opts: { onAccount?: boolean } = {},
+): Promise<void> {
   if (!isEmailConfigured) return;
   try {
     const claim = await Booking.updateOne(
@@ -74,6 +77,7 @@ export async function sendConfirmationEmails(booking: BookingHydrated): Promise<
       vehicleName: b.vehicle?.name ?? "",
       pickupCode,
       qrCid: senderQr?.contentId,
+      onAccount: opts.onAccount,
     });
     for (const to of senderTo) {
       await sendEmail({ to, ...senderMail, inlineImages: senderQr ? [senderQr] : undefined });

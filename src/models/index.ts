@@ -12,3 +12,4 @@ export { Payment, type PaymentDoc } from "./Payment";
 export { StatusHistory, type StatusHistoryDoc } from "./StatusHistory";
 export { HandoverProof, type HandoverProofDoc } from "./HandoverProof";
 export { ProofPhoto, type ProofPhotoDoc } from "./ProofPhoto";
+export { PartnerPayment, type PartnerPaymentDoc } from "./PartnerPayment";

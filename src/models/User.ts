@@ -27,6 +27,17 @@ const userSchema = new Schema(
       /** Most active orders this rider may hold at once. Unset = the server default. */
       maxActiveJobs: { type: Number, min: 1, max: 50 },
     },
+    /** Present on partner accounts. Partners book normally but are billed on account. */
+    partner: {
+      active: { type: Boolean, default: false },
+      company: { type: String, trim: true, maxlength: 120 },
+      /** Added to every fare this partner is quoted. Negative = a discount. */
+      markupPercent: { type: Number, default: 0, min: -90, max: 500 },
+      /** Most the partner may owe at once. Unset = no limit. */
+      creditLimit: { type: Number, min: 0 },
+      notes: { type: String, trim: true, maxlength: 500 },
+      since: { type: Date },
+    },
     /** Password reset flow. */
     resetTokenHash: { type: String, select: false },
     resetTokenExpiresAt: { type: Date, select: false },

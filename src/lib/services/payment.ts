@@ -10,9 +10,8 @@ import { computeRouteMetrics, bookingToRouteInput } from "./quote";
 import { changeBookingStatus } from "./booking";
 import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
-import { ensureHandoverCodes } from "./handover";
-import { sendConfirmationEmails } from "./booking-emails";
-import { autoAssignBooking } from "./autoassign";
+import { activateOrder } from "./activation";
+import { getPartnerMarkup, isActivePartner } from "./partner-pricing";
 import {
   initializeTransaction,
   verifyTransaction,
@@ -56,6 +55,7 @@ export async function repriceBooking(booking: BookingHydrated): Promise<BookingH
         stopCount: metrics.stopCount,
         estimatedDurationSeconds: metrics.estimatedDurationSeconds,
       },
+      await getPartnerMarkup(String(booking.user)),
     );
     booking.distanceKm = metrics.distanceKm;
     booking.estimatedDurationSeconds = metrics.estimatedDurationSeconds;
@@ -85,6 +85,13 @@ export async function initializeBookingPayment(
   }
   if (booking.status === "cancelled") {
     throw new ApiError("This booking was cancelled.", 409);
+  }
+  const owner = await User.findById(userId).select("partner").lean();
+  if (isActivePartner(owner as { partner?: { active?: boolean | null } } | null)) {
+    throw new ApiError(
+      "Your orders are billed to your partner account, so there is nothing to pay online.",
+      409,
+    );
   }
 
   // Don't take payment for a class that filled up since the booking was created.
@@ -222,30 +229,7 @@ export async function reconcilePayment(
     booking.set("payment.rawVerification", verification.raw);
     await booking.save();
 
-    await ensureHandoverCodes(booking);
-    await notify.paymentSucceeded(String(booking.user), booking);
-
-    let finalBooking: BookingHydrated = booking;
-    const justConfirmed = booking.status === "pending";
-    if (justConfirmed) {
-      finalBooking = await changeBookingStatus({
-        bookingId: String(booking._id),
-        to: "confirmed",
-        note: "Payment received",
-        actorRole: "system",
-      });
-    }
-
-    // Paid and confirmed: email the sender and receiver their codes (once only).
-    await sendConfirmationEmails(finalBooking);
-
-    // Then allocate a rider automatically. The rider-assigned emails follow the
-    // confirmation emails, so the code always arrives first.
-    const assigned = await autoAssignBooking(String(finalBooking._id));
-    if (assigned) finalBooking = assigned;
-
-    if (justConfirmed) await notifyAdmins(finalBooking, assigned?.assignedDriver?.name ?? undefined);
-
+    const finalBooking = await activateOrder(booking, { onAccount: false });
     return { booking: finalBooking, paid: true, status: "paid" };
   }
 
@@ -256,17 +240,6 @@ export async function reconcilePayment(
   }
 
   return { booking, paid: false, status: booking.payment.status };
-}
-
-async function notifyAdmins(booking: BookingHydrated, autoAssignedTo?: string) {
-  try {
-    const admins = await User.find({ role: "admin" }).select("_id").lean();
-    await Promise.all(
-      admins.map((a) => notify.adminNewBooking(String(a._id), booking, autoAssignedTo)),
-    );
-  } catch (err) {
-    console.error("[payment] admin notify failed", err);
-  }
 }
 
 /** Verify with Paystack and reconcile. Used by the callback route. */

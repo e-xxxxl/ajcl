@@ -3,6 +3,7 @@ import { verifySession, type SessionClaims } from "./jwt";
 import { connectToDatabase } from "../db";
 import { User } from "../../models/User";
 import { env } from "../env";
+import { partnerPublic } from "../services/partner-pricing";
 import type { SessionUser } from "../../types";
 
 export class UnauthorizedError extends Error {
@@ -87,6 +88,7 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
       role: string;
       superAdmin?: boolean;
       rider?: { plate?: string; vehicleType?: string; active?: boolean; maxActiveJobs?: number };
+      partner?: { active?: boolean | null; company?: string | null };
     };
     return {
       id: String(user._id),
@@ -97,6 +99,7 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
       phone: user.phone,
       role: u.role as "customer" | "admin" | "rider",
       superAdmin: Boolean(u.superAdmin),
+      partner: partnerPublic(u),
       rider:
         u.role === "rider"
           ? {

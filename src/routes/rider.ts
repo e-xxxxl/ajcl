@@ -262,7 +262,7 @@ riderRouter.get(
     if (path.length > 0) {
       const open = await Booking.find({
         status: "confirmed",
-        "payment.status": "paid",
+        "payment.status": { $in: ["paid", "on_account"] },
         assignedRider: { $exists: false },
         "assignedDriver.name": { $exists: false },
         scheduledAt: { $gte: new Date(Date.now() - 6 * 60 * 60 * 1000) },

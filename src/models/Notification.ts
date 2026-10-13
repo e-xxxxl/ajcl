@@ -16,6 +16,8 @@ export const NOTIFICATION_TYPES = [
   "admin_delivery_confirmed",
   "admin_code_locked",
   "admin_handover_flagged",
+  "booking_returned",
+  "partner_payment_recorded",
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];

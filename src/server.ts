@@ -17,6 +17,8 @@ import { notificationsRouter } from "./routes/notifications";
 import { adminRouter } from "./routes/admin";
 import { riderRouter } from "./routes/rider";
 import { trackingRouter } from "./routes/tracking";
+import { partnerRouter } from "./routes/partner";
+import { ensureCloudinaryFolder } from "./lib/storage/cloudinary";
 
 const app = express();
 
@@ -56,6 +58,7 @@ app.use("/api/notifications", notificationsRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/rider", riderRouter);
 app.use("/api/track", trackingRouter);
+app.use("/api/partner", partnerRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
@@ -75,6 +78,7 @@ void (async () => {
     await connectToDatabase();
     await ensureBootstrapped();
     console.log("[server] database connected");
+    void ensureCloudinaryFolder();
   } catch (err) {
     console.error("[server] initial database connection failed:", err instanceof Error ? err.message : err);
   }

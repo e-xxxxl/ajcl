@@ -165,7 +165,7 @@ export const notify = {
     userId: string,
     booking: BookingLike,
     status: string,
-    opts: { skipEmail?: boolean } = {},
+    opts: { skipEmail?: boolean; detail?: string } = {},
   ) {
     const map: Record<string, { type: NotificationType; title: string; body: string }> = {
       confirmed: {
@@ -193,6 +193,11 @@ export const notify = {
         title: "Booking cancelled",
         body: `Booking ${booking.bookingReference} has been cancelled.`,
       },
+      returned: {
+        type: "booking_returned",
+        title: "Order returned",
+        body: `Booking ${booking.bookingReference} could not be delivered and has been returned.`,
+      },
     };
     const t = map[status];
     if (!t) return;
@@ -201,7 +206,7 @@ export const notify = {
       userId,
       type: t.type,
       title: t.title,
-      body: t.body,
+      body: opts.detail ? `${t.body} ${opts.detail}` : t.body,
       href: bookingHref(booking.bookingReference),
       bookingId: String(booking._id),
       bookingReference: booking.bookingReference,
@@ -216,17 +221,48 @@ export const notify = {
           : undefined,
     });
   },
-  async adminNewBooking(adminUserId: string, booking: BookingLike, autoAssignedTo?: string) {
+  async adminNewBooking(
+    adminUserId: string,
+    booking: BookingLike,
+    info: { riderName?: string; partnerName?: string; total?: number } = {},
+  ) {
+    const rider = info.riderName;
+    const partner = info.partnerName;
+    const money = typeof info.total === "number" ? ` (₦${info.total.toLocaleString("en-NG")} on account)` : "";
     return dispatch({
       userId: adminUserId,
       type: "admin_new_booking",
-      title: autoAssignedTo ? "New paid booking, rider assigned" : "New paid booking needs a rider",
-      body: autoAssignedTo
-        ? `${booking.bookingReference} has been paid and was automatically assigned to ${autoAssignedTo}.`
-        : `${booking.bookingReference} has been paid, but no rider was free to take it automatically. Please assign one.`,
+      title: partner
+        ? rider
+          ? "New partner order, rider assigned"
+          : "New partner order needs a rider"
+        : rider
+          ? "New paid booking, rider assigned"
+          : "New paid booking needs a rider",
+      body: partner
+        ? rider
+          ? `${partner} placed order ${booking.bookingReference}${money}. It was automatically assigned to ${rider}.`
+          : `${partner} placed order ${booking.bookingReference}${money}, but no rider was free to take it automatically. Please assign one.`
+        : rider
+          ? `${booking.bookingReference} has been paid and was automatically assigned to ${rider}.`
+          : `${booking.bookingReference} has been paid, but no rider was free to take it automatically. Please assign one.`,
       href: `/admin/bookings/${booking.bookingReference}`,
       bookingId: String(booking._id),
       bookingReference: booking.bookingReference,
+    });
+  },
+  /** To a partner: the admin recorded a payment against their balance. */
+  async partnerPaymentRecorded(partnerId: string, amount: number, outstanding: number) {
+    const fmt = (n: number) => `₦${n.toLocaleString("en-NG")}`;
+    return dispatch({
+      userId: partnerId,
+      type: "partner_payment_recorded",
+      title: "Payment recorded",
+      body:
+        outstanding > 0
+          ? `We recorded your payment of ${fmt(amount)}. You still owe ${fmt(outstanding)}.`
+          : `We recorded your payment of ${fmt(amount)}. Your account is fully settled. Thank you.`,
+      href: "/dashboard/account",
     });
   },
   /** To the rider themselves — a new job landed in their dashboard. */

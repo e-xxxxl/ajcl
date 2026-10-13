@@ -17,6 +17,7 @@ import { getCurrentUser } from "../lib/auth/middleware";
 import { enforceRateLimit } from "../lib/rate-limit";
 import { ensureBootstrapped } from "../lib/bootstrap";
 import { env } from "../lib/env";
+import { partnerPublic } from "../lib/services/partner-pricing";
 import { User } from "../models/User";
 import { sendEmail } from "../lib/email/send";
 import { passwordResetEmail, welcomeEmail } from "../lib/email/templates";
@@ -139,6 +140,7 @@ authRouter.post(
         phone: user.phone,
         role: user.role as "customer" | "admin",
         superAdmin,
+        partner: partnerPublic(user),
       },
     });
   }),

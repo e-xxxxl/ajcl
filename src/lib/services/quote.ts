@@ -174,9 +174,18 @@ export async function computeRouteMetrics(
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /** Build a full quote: route metrics + a price for every active vehicle. */
+/** The fare a partner is shown is already adjusted; the percentage itself stays private. */
+function withoutMarkup<T extends { markupPercent?: number }>(price: T): Omit<T, "markupPercent"> {
+  const { markupPercent: _hidden, ...rest } = price;
+  void _hidden;
+  return rest;
+}
+
 export async function buildQuote(
   input: RouteInput,
   opts: MetricsOptions = {},
+  /** Partner markup for the person asking (0 for ordinary customers). */
+  markupPercent = 0,
 ): Promise<QuoteDTO> {
   await connectToDatabase();
   const vehicles = await Vehicle.find({ active: true }).sort({ sortOrder: 1, name: 1 }).lean();
@@ -216,7 +225,7 @@ export async function buildQuote(
       const avail = unitsAvailable(v.fleetSize, inUseBySlug.get(v.slug) ?? 0);
       return {
         vehicle: serializeVehicle(v),
-        price: calculatePrice(
+        price: withoutMarkup(calculatePrice(
           {
             slug: v.slug,
             name: v.name,
@@ -225,7 +234,8 @@ export async function buildQuote(
             minimumFare: v.minimumFare,
           },
           { ...priceMetrics, estimatedDurationSeconds: scaled },
-        ),
+          markupPercent,
+        )),
         unitsAvailable: avail,
         soldOut: avail === 0,
       };

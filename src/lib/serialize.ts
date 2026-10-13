@@ -117,6 +117,9 @@ export function serializeBooking(
           }
         : undefined,
     assignedRiderId: b.assignedRider ? id(b.assignedRider) : undefined,
+    returnedAt: iso(b.returnedAt),
+    returnReason: b.returnReason ?? undefined,
+    returnNote: b.returnNote ?? undefined,
     handover: {
       pickupUsedAt: iso(b.handover?.pickupCodeUsedAt),
       pickupLocked: b.handover?.pickupLocked ?? false,

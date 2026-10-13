@@ -5,6 +5,7 @@ import { User } from "../../models/User";
 import { changeBookingStatus } from "./booking";
 import { notify } from "../notifications";
 import { ApiError } from "../api";
+import { isFundedPayment } from "../../config/booking";
 
 /**
  * Automatic rider allocation.
@@ -162,7 +163,7 @@ export function isOpenForAssignment(b: {
 }): boolean {
   return (
     b.status === "confirmed" &&
-    b.payment?.status === "paid" &&
+    isFundedPayment(b.payment?.status) &&
     !b.assignedRider &&
     !b.assignedDriver?.name &&
     !b.assignedDriver?.phone
@@ -214,7 +215,7 @@ export async function autoAssignBooking(bookingId: string): Promise<BookingHydra
   try {
     await connectToDatabase();
     const booking = await Booking.findById(bookingId).lean();
-    if (!booking || booking.status !== "confirmed" || booking.payment?.status !== "paid") return null;
+    if (!booking || booking.status !== "confirmed" || !isFundedPayment(booking.payment?.status)) return null;
     if (booking.assignedRider) return null;
     // A rider typed in by hand (no account) is the admin's choice. Leave it.
     if (booking.assignedDriver?.name || booking.assignedDriver?.phone) return null;
@@ -248,7 +249,7 @@ export async function autoAssignPending(): Promise<number> {
     await connectToDatabase();
     const waiting = await Booking.find({
       status: "confirmed",
-      "payment.status": "paid",
+      "payment.status": { $in: ["paid", "on_account"] },
       assignedRider: { $exists: false },
       "assignedDriver.name": { $exists: false },
       scheduledAt: { $gte: new Date(Date.now() - 6 * 60 * 60 * 1000) },

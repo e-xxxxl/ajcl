@@ -2,6 +2,7 @@ import { connectToDatabase } from "../db";
 import { Booking } from "../../models/Booking";
 import { Payment } from "../../models/Payment";
 import { User } from "../../models/User";
+import { partnerOutstandingTotals } from "./partner";
 
 export type AdminStats = {
   totalBookings: number;
@@ -9,6 +10,10 @@ export type AdminStats = {
   activeDeliveries: number;
   completedDeliveries: number;
   cancelledBookings: number;
+  returnedBookings: number;
+  /** Total owed by partners, and how many partners owe something. */
+  partnerOutstanding: number;
+  partnersOwing: number;
   revenue: number;
   revenueThisMonth: number;
   customers: number;
@@ -29,16 +34,19 @@ export async function getAdminStats(): Promise<AdminStats> {
     activeDeliveries,
     completedDeliveries,
     cancelledBookings,
+    returnedBookings,
     customers,
     recentBookings,
     revenueAgg,
     revenueMonthAgg,
+    partnerTotals,
   ] = await Promise.all([
     Booking.countDocuments({}),
     Booking.countDocuments({ status: "pending" }),
     Booking.countDocuments({ status: { $in: ["confirmed", "driver_assigned", "in_transit"] } }),
     Booking.countDocuments({ status: "delivered" }),
     Booking.countDocuments({ status: "cancelled" }),
+    Booking.countDocuments({ status: "returned" }),
     User.countDocuments({ role: "customer" }),
     Booking.countDocuments({ createdAt: { $gte: weekAgo } }),
     Payment.aggregate<{ _id: null; total: number }>([
@@ -49,6 +57,7 @@ export async function getAdminStats(): Promise<AdminStats> {
       { $match: { status: "success", paidAt: { $gte: startOfMonth } } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ]),
+    partnerOutstandingTotals(),
   ]);
 
   return {
@@ -57,6 +66,9 @@ export async function getAdminStats(): Promise<AdminStats> {
     activeDeliveries,
     completedDeliveries,
     cancelledBookings,
+    returnedBookings,
+    partnerOutstanding: partnerTotals.outstanding,
+    partnersOwing: partnerTotals.partnersOwing,
     revenue: revenueAgg[0]?.total ?? 0,
     revenueThisMonth: revenueMonthAgg[0]?.total ?? 0,
     customers,

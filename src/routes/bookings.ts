@@ -13,6 +13,8 @@ import { createBooking, changeBookingStatus } from "../lib/services/booking";
 import { serializeBooking } from "../lib/serialize";
 import { Booking } from "../models/Booking";
 import { listProofs, getPhoto } from "../lib/services/proof";
+import { getPartnerMarkup } from "../lib/services/partner-pricing";
+import { placeOrderOnAccount } from "../lib/services/partner";
 
 export const bookingsRouter = Router();
 
@@ -20,7 +22,7 @@ export const bookingsRouter = Router();
 bookingsRouter.post(
   "/quote",
   asyncHandler(async (req, res) => {
-    requireSession(req);
+    const session = requireSession(req);
     enforceRateLimit(req, "quote", { limit: 40, windowMs: 60 * 1000 });
 
     const { clientRoute, ...input } = parse(priceQuoteSchema, req.body);
@@ -30,7 +32,8 @@ bookingsRouter.post(
       throw new ApiError((e as Error).message, 422);
     }
 
-    const quote = await buildQuote(input, { clientRoute });
+    // Partners are quoted their own price (the admin's markup is applied; the percentage is never sent).
+    const quote = await buildQuote(input, { clientRoute }, await getPartnerMarkup(session.sub));
     return ok(res, quote);
   }),
 );
@@ -71,6 +74,18 @@ bookingsRouter.post(
 );
 
 /** GET /api/bookings/:reference — one of the current user's bookings. */
+/** POST /api/bookings/:reference/place-on-account: a partner places the order without paying.
+ *  It is billed to their account and goes through like a paid order. */
+bookingsRouter.post(
+  "/:reference/place-on-account",
+  asyncHandler(async (req, res) => {
+    const session = requireSession(req);
+    enforceRateLimit(req, "place-on-account", { limit: 30, windowMs: 10 * 60 * 1000 });
+    const booking = await placeOrderOnAccount(session.sub, req.params.reference);
+    return ok(res, { booking: serializeBooking(booking.toObject()) });
+  }),
+);
+
 bookingsRouter.get(
   "/:reference",
   asyncHandler(async (req, res) => {

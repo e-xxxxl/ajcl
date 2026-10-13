@@ -31,6 +31,8 @@ export type PriceBreakdown = {
   minimumFareApplied: boolean;
   total: number;
   currency: string;
+  /** Partner markup/discount that was applied to the subtotal, in percent (0 for everyone else). */
+  markupPercent: number;
 };
 
 function round(value: number, nearest: number): number {
@@ -45,6 +47,8 @@ function round(value: number, nearest: number): number {
 export function calculatePrice(
   vehicle: PricingVehicle,
   metrics: PricingRouteMetrics,
+  /** Admin-set partner markup (+) or discount (-), in percent. Applied to the fare before tax. */
+  markupPercent = 0,
 ): PriceBreakdown {
   const { returnLegMultiplier, perStopFee, taxRate, roundToNearest, currency } = PRICING_RULES;
 
@@ -63,6 +67,10 @@ export function calculatePrice(
     minimumFareApplied = true;
   }
 
+  // A partner's price differs from the public price by the admin's markup. It is applied to
+  // the finished fare (after the minimum fare) so a partner never pays below their own floor.
+  if (markupPercent) subtotal = round(subtotal * (1 + markupPercent / 100), 0.01);
+
   const tax = round(subtotal * taxRate, 0.01);
   const total = round(subtotal + tax, roundToNearest);
 
@@ -79,6 +87,7 @@ export function calculatePrice(
     minimumFareApplied,
     total,
     currency,
+    markupPercent,
   };
 }
 

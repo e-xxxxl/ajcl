@@ -220,6 +220,21 @@ const EVENTS: Partial<Record<NotificationType, (ctx: EventCtx) => EventContent>>
     ],
     cta: { label: "View booking", href: `/dashboard/bookings/${ref}` },
   }),
+  booking_returned: ({ ref, body }) => ({
+    subject: `Order ${ref} was returned`,
+    heading: "Your order was returned",
+    paragraphs: [
+      body || `Order ${ref} could not be delivered and has been returned.`,
+      "If you would like it sent out again, book a new delivery or contact our team and we will help.",
+    ],
+    cta: { label: "View order", href: `/dashboard/bookings/${ref}` },
+  }),
+  partner_payment_recorded: ({ body }) => ({
+    subject: "Payment recorded on your account",
+    heading: "Payment recorded",
+    paragraphs: [body || "A payment was recorded against your account."],
+    cta: { label: "View your account", href: "/dashboard/account" },
+  }),
   admin_new_booking: ({ ref, body }) => ({
     subject: `New paid booking: ${ref}`,
     heading: "New paid booking",

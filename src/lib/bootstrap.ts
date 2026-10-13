@@ -86,7 +86,7 @@ export async function ensureBootstrapped(): Promise<void> {
     // feature shipped (a fresh booking gets its codes the moment payment succeeds).
     try {
       const legacy = await Booking.find({
-        "payment.status": "paid",
+        "payment.status": { $in: ["paid", "on_account"] },
         status: { $in: ["confirmed", "driver_assigned", "in_transit"] },
         "handover.pickupCode": { $exists: false },
       })

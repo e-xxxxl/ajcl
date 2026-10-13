@@ -4,6 +4,13 @@ import { env } from "../env";
 import { HandoverProof } from "../../models/HandoverProof";
 import { ProofPhoto } from "../../models/ProofPhoto";
 import { haversineKm, pointOf, type StopLocation } from "./route-plan";
+import {
+  cloudStorageEnabled,
+  uploadProofPhoto,
+  downloadProofPhoto,
+  destroyProofPhotos,
+  type UploadedPhoto,
+} from "../storage/cloudinary";
 import type { ProofDTO } from "../../types";
 
 export const MAX_PROOF_PHOTOS = 2;
@@ -75,7 +82,20 @@ export function assessLocation(
   };
 }
 
-/** Store the photos and the proof record. Cleans up the photos if the proof can't be saved. */
+/** Delete proof photos (and their Cloudinary copies) matching a filter. */
+export async function deleteProofPhotos(filter: Record<string, unknown>): Promise<void> {
+  const docs = await ProofPhoto.find(filter).select("storage publicId").lean();
+  await destroyProofPhotos(
+    docs.filter((d) => d.storage === "cloudinary" && d.publicId).map((d) => d.publicId as string),
+  );
+  await ProofPhoto.deleteMany(filter);
+}
+
+/**
+ * Store the photos and the proof record. Photos go to the AJCL folder on Cloudinary when
+ * it is configured; if Cloudinary is off or the upload fails they are kept in MongoDB
+ * instead, so a rider is never blocked from confirming a handover.
+ */
 export async function saveProof(params: {
   bookingId: unknown;
   bookingReference: string;
@@ -87,14 +107,54 @@ export async function saveProof(params: {
   assessment: { distanceFromTargetM?: number; flagged: boolean };
 }) {
   const bookingId = String(params.bookingId);
-  const saved = await ProofPhoto.insertMany(
-    params.photos.map((p) => ({
-      booking: bookingId,
-      contentType: p.contentType,
-      size: p.buffer.length,
-      data: p.buffer,
-    })),
-  );
+  let saved: { _id: unknown }[] | null = null;
+
+  if (cloudStorageEnabled()) {
+    const uploaded: UploadedPhoto[] = [];
+    try {
+      for (const p of params.photos) {
+        uploaded.push(
+          await uploadProofPhoto({
+            buffer: p.buffer,
+            contentType: p.contentType,
+            bookingReference: params.bookingReference,
+            stage: params.stage,
+          }),
+        );
+      }
+      saved = await ProofPhoto.insertMany(
+        uploaded.map((u, i) => ({
+          booking: bookingId,
+          contentType: params.photos[i].contentType,
+          size: u.bytes || params.photos[i].buffer.length,
+          storage: "cloudinary" as const,
+          publicId: u.publicId,
+          version: u.version,
+          format: u.format,
+        })),
+      );
+    } catch (err) {
+      console.error(
+        "[proof] Cloudinary upload failed, keeping the photos in MongoDB instead:",
+        err instanceof Error ? err.message : err,
+      );
+      await destroyProofPhotos(uploaded.map((u) => u.publicId));
+      saved = null;
+    }
+  }
+
+  if (!saved) {
+    saved = await ProofPhoto.insertMany(
+      params.photos.map((p) => ({
+        booking: bookingId,
+        contentType: p.contentType,
+        size: p.buffer.length,
+        storage: "mongo" as const,
+        data: p.buffer,
+      })),
+    );
+  }
+
   try {
     return await HandoverProof.create({
       booking: bookingId,
@@ -103,10 +163,10 @@ export async function saveProof(params: {
       rider: params.riderId,
       riderName: params.riderName,
       location: { ...params.fix, ...params.assessment },
-      photos: saved.map((s) => s._id),
+      photos: saved.map((x) => x._id as never),
     });
   } catch (err) {
-    await ProofPhoto.deleteMany({ _id: { $in: saved.map((s) => s._id) } });
+    await deleteProofPhotos({ _id: { $in: saved.map((x) => String(x._id)) } });
     throw err;
   }
 }
@@ -115,7 +175,7 @@ export async function saveProof(params: {
 export async function deleteProof(proofId: unknown) {
   const proof = await HandoverProof.findById(String(proofId)).lean();
   if (!proof) return;
-  await ProofPhoto.deleteMany({ _id: { $in: proof.photos.map(String) } });
+  await deleteProofPhotos({ _id: { $in: proof.photos.map(String) } });
   await HandoverProof.deleteOne({ _id: proof._id });
 }
 
@@ -168,5 +228,19 @@ export async function getPhoto(bookingId: unknown, photoId: string) {
   if (!Types.ObjectId.isValid(photoId)) return null;
   const photo = await ProofPhoto.findOne({ _id: photoId, booking: String(bookingId) }).select("+data");
   if (!photo) return null;
+
+  if (photo.storage === "cloudinary" && photo.publicId) {
+    try {
+      const data = await downloadProofPhoto({
+        publicId: photo.publicId,
+        version: photo.version ?? undefined,
+        format: photo.format ?? undefined,
+      });
+      return { contentType: photo.contentType, data };
+    } catch (err) {
+      console.error("[proof] could not read photo from Cloudinary:", err instanceof Error ? err.message : err);
+      throw new ApiError("The photo is temporarily unavailable. Please try again.", 502);
+    }
+  }
   return { contentType: photo.contentType, data: photo.data as Buffer };
 }

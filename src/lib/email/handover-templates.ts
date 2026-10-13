@@ -99,6 +99,8 @@ export function senderConfirmationEmail(p: {
   vehicleName: string;
   pickupCode: string;
   qrCid?: string;
+  /** Partner order: billed to their account, so no payment wording. */
+  onAccount?: boolean;
 }): EmailOut {
   const warning =
     "Do not share it by phone, chat or message, and do not give it to anyone who says they are a rider until they are physically standing in front of you. AJ Courier & Logistics will never ask you for this code by phone or message.";
@@ -114,7 +116,9 @@ export function senderConfirmationEmail(p: {
     heading: "Your booking is confirmed",
     paragraphs: [
       p.name ? `Hi ${p.name},` : "Hi,",
-      `We have received your payment and booking ${p.ref} is confirmed.`,
+      p.onAccount
+        ? `Your order ${p.ref} has been placed on your partner account and is confirmed. No payment is needed now.`
+        : `We have received your payment and booking ${p.ref} is confirmed.`,
       `Pickup: ${p.pickupAddress}\nDelivery to: ${p.destinationAddress}\nScheduled: ${p.scheduledLabel}\nVehicle: ${p.vehicleName}`,
       "Below is your pickup code. It proves to the rider that they are collecting the right package from you.",
     ],

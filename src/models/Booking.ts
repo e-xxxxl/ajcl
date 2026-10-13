@@ -68,6 +68,12 @@ const pricingSchema = new Schema(
     subtotal: { type: Number, required: true, min: 0 },
     total: { type: Number, required: true, min: 0 },
     currency: { type: String, default: "NGN" },
+    /** Partner price markup (or discount, if negative) that was applied to this fare. */
+    markupPercent: { type: Number, default: 0 },
+    /** Set when an admin changes the amount of a partner order by hand. */
+    originalTotal: { type: Number, min: 0 },
+    adjustmentNote: { type: String, trim: true, maxlength: 300 },
+    adjustedAt: { type: Date },
     /** Snapshot for audit — recomputed & verified server-side before payment. */
     computedAt: { type: Date, default: Date.now },
   },
@@ -79,7 +85,7 @@ const paymentSchema = new Schema(
     provider: { type: String, default: "paystack" },
     status: {
       type: String,
-      enum: ["unpaid", "pending", "paid", "failed", "refunded"],
+      enum: ["unpaid", "pending", "paid", "failed", "refunded", "on_account"],
       default: "unpaid",
       index: true,
     },
@@ -195,7 +201,7 @@ const bookingSchema = new Schema(
     // ── Lifecycle ────────────────────────────────────────────
     status: {
       type: String,
-      enum: [...BOOKING_STATUS_FLOW, "cancelled"],
+      enum: [...BOOKING_STATUS_FLOW, "cancelled", "returned"],
       default: "pending",
       index: true,
     },
@@ -215,6 +221,9 @@ const bookingSchema = new Schema(
     handover: { type: handoverSchema, default: () => ({}) },
 
     cancelledReason: { type: String, trim: true, maxlength: 500 },
+    returnedAt: { type: Date },
+    returnReason: { type: String, trim: true, maxlength: 60 },
+    returnNote: { type: String, trim: true, maxlength: 500 },
     confirmedAt: { type: Date },
     deliveredAt: { type: Date },
   },

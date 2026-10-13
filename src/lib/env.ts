@@ -10,6 +10,20 @@ function get(name: string): string | undefined {
   return value && value.trim() !== "" ? value.trim() : undefined;
 }
 
+/** Cloudinary credentials: either CLOUDINARY_URL (cloudinary://key:secret@cloud) or the three separate vars. */
+function readCloudinary() {
+  const url = get("CLOUDINARY_URL");
+  if (url) {
+    const m = /^cloudinary:\/\/([^:]+):([^@]+)@(.+)$/.exec(url);
+    if (m) return { apiKey: m[1], apiSecret: m[2], cloudName: m[3] };
+  }
+  return {
+    cloudName: get("CLOUDINARY_CLOUD_NAME"),
+    apiKey: get("CLOUDINARY_API_KEY"),
+    apiSecret: get("CLOUDINARY_API_SECRET"),
+  };
+}
+
 export const env = {
   port: Number(process.env.PORT) || 4000,
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -56,6 +70,9 @@ export const env = {
    *  (metres, beyond the fix's own accuracy) from the booked address. */
   proofRadiusM: Math.max(50, Number(get("PROOF_RADIUS_M")) || 300),
 
+  /** Proof photos are stored on Cloudinary when these are set (else in MongoDB). */
+  cloudinary: { ...readCloudinary(), folder: get("CLOUDINARY_FOLDER") ?? "AJCL" },
+
   /** Resend transactional email. */
   resendApiKey: get("RESEND_API_KEY"),
   /** "Name <address@domain>" — the sender address must be on a Resend-verified domain. */
@@ -68,6 +85,9 @@ export const isDatabaseConfigured = Boolean(env.mongodbUri);
 export const isMapsServerConfigured = Boolean(env.googleMapsServerKey);
 export const isPaystackConfigured = Boolean(env.paystackSecretKey);
 export const isEmailConfigured = Boolean(env.resendApiKey);
+export const isCloudinaryConfigured = Boolean(
+  env.cloudinary.cloudName && env.cloudinary.apiKey && env.cloudinary.apiSecret,
+);
 
 if (env.isProd && env.jwtSecret.startsWith("insecure-development-secret")) {
   console.warn(

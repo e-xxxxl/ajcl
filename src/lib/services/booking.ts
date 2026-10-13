@@ -9,8 +9,9 @@ import { calculatePrice } from "../pricing/engine";
 import { computeRouteMetrics } from "./quote";
 import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
+import { getPartnerMarkup } from "./partner-pricing";
 import { sendRiderAssignedEmails } from "./booking-emails";
-import { BOOKING_STATUS_FLOW, type BookingStatus } from "../../config/booking";
+import { BOOKING_STATUS_FLOW, returnReasonLabel, type BookingStatus } from "../../config/booking";
 import type { CreateBookingInput } from "../validation/booking";
 
 /** Allowed status transitions (admin). "cancelled" is reachable from any non-terminal state. */
@@ -18,9 +19,11 @@ const TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
   pending: ["confirmed", "cancelled"],
   confirmed: ["driver_assigned", "cancelled"],
   driver_assigned: ["in_transit", "cancelled"],
-  in_transit: ["delivered", "cancelled"],
-  delivered: [],
+  in_transit: ["delivered", "returned", "cancelled"],
+  // A delivered order can still come back later (the receiver sends it back).
+  delivered: ["returned"],
   cancelled: [],
+  returned: [],
 };
 
 export function canTransition(from: BookingStatus, to: BookingStatus): boolean {
@@ -82,6 +85,7 @@ export async function createBooking(
       stopCount: metrics.stopCount,
       estimatedDurationSeconds: metrics.estimatedDurationSeconds,
     },
+    await getPartnerMarkup(userId),
   );
 
   const now = new Date();
@@ -163,6 +167,9 @@ export async function changeBookingStatus(params: {
   actorId?: string;
   driver?: { name?: string; phone?: string; plate?: string };
   force?: boolean;
+  /** Required when moving a booking to "returned". */
+  returnReason?: string;
+  returnNote?: string;
 }): Promise<BookingHydrated> {
   await connectToDatabase();
   const booking = await Booking.findById(params.bookingId);
@@ -174,6 +181,9 @@ export async function changeBookingStatus(params: {
   if (from === to) throw new ApiError(`Booking is already ${to}.`, 409);
   if (!params.force && !canTransition(from, to)) {
     throw new ApiError(`Cannot move a ${from} booking to ${to}.`, 409);
+  }
+  if (to === "returned" && !params.returnReason) {
+    throw new ApiError("Choose why the order was returned.", 422);
   }
 
   const now = new Date();
@@ -196,6 +206,11 @@ export async function changeBookingStatus(params: {
   if (to === "confirmed" && !booking.confirmedAt) booking.confirmedAt = now;
   if (to === "delivered") booking.deliveredAt = now;
   if (to === "cancelled") booking.cancelledReason = params.note;
+  if (to === "returned") {
+    booking.returnedAt = now;
+    booking.returnReason = params.returnReason;
+    booking.returnNote = params.returnNote || params.note || undefined;
+  }
   if (to === "confirmed" && booking.payment?.status === "unpaid") {
     booking.payment.status = "pending";
   }
@@ -225,19 +240,25 @@ export async function changeBookingStatus(params: {
   const paymentDriven = to === "confirmed" && params.actorRole === "system";
   await notify.statusChanged(String(booking.user), booking, to, {
     skipEmail: paymentDriven || to === "driver_assigned",
+    detail: to === "returned" ? returnDetail(booking.returnReason, booking.returnNote) : undefined,
   });
   if (to === "driver_assigned") await sendRiderAssignedEmails(booking._id);
 
-  // A cancelled job frees its rider. Let a waiting booking take their place.
+  // A cancelled or returned job frees its rider. Let a waiting booking take their place.
   // (Imported lazily: the auto-assign engine itself calls this function.)
-  if (to === "cancelled" && booking.assignedRider) {
+  if ((to === "cancelled" || to === "returned") && booking.assignedRider) {
     void import("./autoassign").then((m) => m.autoAssignPending()).catch(() => undefined);
   }
 
   return booking;
 }
 
+function returnDetail(reason?: string | null, note?: string | null): string {
+  const label = returnReasonLabel(reason);
+  return note ? `Reason: ${label}. ${note}` : `Reason: ${label}.`;
+}
+
 export function progressIndex(status: BookingStatus): number {
-  if (status === "cancelled") return -1;
+  if (status === "cancelled" || status === "returned") return -1;
   return BOOKING_STATUS_FLOW.indexOf(status);
 }

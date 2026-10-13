@@ -20,13 +20,16 @@ import { changeBookingStatus } from "../lib/services/booking";
 import { activeUnitsBySlug } from "../lib/services/fleet";
 import { assignRiderToBooking, resetHandoverLock } from "../lib/services/rider";
 import { findBestRider, autoAssignPending } from "../lib/services/autoassign";
-import { listProofs, getPhoto, toProofDTO } from "../lib/services/proof";
+import { listProofs, getPhoto, toProofDTO, deleteProofPhotos } from "../lib/services/proof";
 import { HandoverProof } from "../models/HandoverProof";
-import { ProofPhoto } from "../models/ProofPhoto";
+import { PartnerPayment } from "../models/PartnerPayment";
+import { getPartnerLedger, partnerBalances } from "../lib/services/partner";
+import { isActivePartner } from "../lib/services/partner-pricing";
+import { notify } from "../lib/notifications";
 import { vehicleUpsertSchema, vehiclePatchSchema } from "../lib/validation/vehicle";
 import { slugify } from "../lib/utils";
 import { env } from "../lib/env";
-import { BOOKING_STATUS_FLOW, type BookingStatus } from "../config/booking";
+import { BOOKING_STATUS_FLOW, RETURN_REASONS, type BookingStatus } from "../config/booking";
 
 export const adminRouter = Router();
 
@@ -203,10 +206,14 @@ adminRouter.get(
   }),
 );
 
-const STATUSES = [...BOOKING_STATUS_FLOW, "cancelled"] as const;
+const STATUSES = [...BOOKING_STATUS_FLOW, "cancelled", "returned"] as const;
+const RETURN_REASON_VALUES = RETURN_REASONS.map((r) => r.value) as [string, ...string[]];
 const statusSchema = z.object({
   status: z.enum(STATUSES),
   note: z.string().trim().max(500).optional(),
+  /** Required when marking an order returned. */
+  returnReason: z.enum(RETURN_REASON_VALUES).optional(),
+  returnNote: z.string().trim().max(500).optional(),
   driverName: z.string().trim().max(120).optional(),
   driverPhone: z.string().trim().max(30).optional(),
   driverPlate: z.string().trim().max(20).optional(),
@@ -253,6 +260,8 @@ adminRouter.patch(
           ? { name: input.driverName, phone: input.driverPhone, plate: input.driverPlate }
           : undefined,
       force: input.force,
+      returnReason: input.returnReason,
+      returnNote: input.returnNote,
     });
 
     return ok(res, { booking: serializeBooking(updated.toObject(), { includeCustomer: false }) });
@@ -390,7 +399,7 @@ async function hardDeleteBookings(filter: Record<string, unknown>): Promise<numb
   if (ids.length === 0) return 0;
   await Promise.all([
     HandoverProof.deleteMany({ booking: { $in: ids } }),
-    ProofPhoto.deleteMany({ booking: { $in: ids } }),
+    deleteProofPhotos({ booking: { $in: ids } }),
     Payment.deleteMany({ booking: { $in: ids } }),
     StatusHistory.deleteMany({ booking: { $in: ids } }),
     Notification.deleteMany({ booking: { $in: ids } }),
@@ -721,6 +730,278 @@ adminRouter.delete(
     await User.deleteOne({ _id: rider._id });
     console.info(`[admin] ${me.email} removed rider ${rider.email}`);
     return ok(res, { deleted: true });
+  }),
+);
+
+/* ── Partners ────────────────────────────────────────────────────────────
+ * Partners book like customers but are billed on account. The admin sets each partner's
+ * price markup and optional credit limit, and records the payments they make. */
+
+const partnerSettingsSchema = z.object({
+  company: z.string().trim().max(120).optional(),
+  /** Added to every fare this partner is quoted. Negative = a discount. */
+  markupPercent: z.number().min(-90, "At least -90%").max(500, "At most 500%").optional(),
+  /** Most the partner may owe at once. null clears the limit. */
+  creditLimit: z.number().min(0).max(1_000_000_000).nullable().optional(),
+  notes: z.string().trim().max(500).optional(),
+});
+
+const createPartnerSchema = partnerSettingsSchema.extend({
+  email: z.string().trim().toLowerCase().email("Enter a valid email"),
+  /** Only needed when the email doesn't belong to an existing customer. */
+  firstName: z.string().trim().max(60).optional(),
+  lastName: z.string().trim().max(60).optional(),
+  phone: z.string().trim().max(30).optional(),
+  password: z
+    .string()
+    .min(8, "Use at least 8 characters")
+    .max(72)
+    .regex(/[a-z]/, "Add a lowercase letter")
+    .regex(/[A-Z]/, "Add an uppercase letter")
+    .regex(/[0-9]/, "Add a number")
+    .optional(),
+});
+
+type PartnerLean = {
+  _id: unknown;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  partner?: {
+    active?: boolean | null;
+    company?: string | null;
+    markupPercent?: number | null;
+    creditLimit?: number | null;
+    notes?: string | null;
+    since?: Date | null;
+  } | null;
+};
+
+function serializePartner(u: PartnerLean, bal?: { billed: number; paid: number; orderCount: number }) {
+  const billed = bal?.billed ?? 0;
+  const paid = bal?.paid ?? 0;
+  return {
+    id: String(u._id),
+    firstName: u.firstName,
+    lastName: u.lastName,
+    fullName: `${u.firstName} ${u.lastName}`.trim(),
+    email: u.email,
+    phone: u.phone,
+    active: Boolean(u.partner?.active),
+    company: u.partner?.company || undefined,
+    markupPercent: u.partner?.markupPercent ?? 0,
+    creditLimit: u.partner?.creditLimit ?? null,
+    notes: u.partner?.notes || undefined,
+    since: u.partner?.since ? new Date(u.partner.since).toISOString() : undefined,
+    billed,
+    paid,
+    outstanding: Math.max(0, Math.round((billed - paid) * 100) / 100),
+    orderCount: bal?.orderCount ?? 0,
+  };
+}
+
+function partnerPatch(input: z.infer<typeof partnerSettingsSchema>, current?: PartnerLean["partner"]) {
+  return {
+    active: current?.active ?? true,
+    company: input.company !== undefined ? input.company || undefined : current?.company ?? undefined,
+    markupPercent: input.markupPercent !== undefined ? input.markupPercent : current?.markupPercent ?? 0,
+    creditLimit:
+      input.creditLimit === undefined ? current?.creditLimit ?? undefined : (input.creditLimit ?? undefined),
+    notes: input.notes !== undefined ? input.notes || undefined : current?.notes ?? undefined,
+    since: current?.since ?? new Date(),
+  };
+}
+
+/** GET /api/admin/partners: every partner with what they owe. */
+adminRouter.get(
+  "/partners",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+    const users = (await User.find({ "partner.since": { $exists: true } }).sort({ createdAt: 1 }).lean()) as unknown as PartnerLean[];
+    const balances = await partnerBalances(users.map((u) => String(u._id)));
+    return ok(res, { partners: users.map((u) => serializePartner(u, balances.get(String(u._id)))) });
+  }),
+);
+
+/** POST /api/admin/partners: make an existing customer a partner, or create a new partner account. */
+adminRouter.post(
+  "/partners",
+  asyncHandler(async (req, res) => {
+    const me = requireAdmin(req);
+    await connectToDatabase();
+    const input = parse(createPartnerSchema, req.body);
+
+    const existing = await User.findOne({ email: input.email });
+    if (existing) {
+      if (existing.role !== "customer") {
+        throw new ApiError("That email belongs to an admin or rider account, which can't be a partner.", 409);
+      }
+      existing.set("partner", partnerPatch(input, (existing as unknown as PartnerLean).partner));
+      existing.set("partner.active", true);
+      await existing.save();
+      console.info(`[admin] ${me.email} made ${existing.email} a partner`);
+      return ok(res, { partner: serializePartner(existing.toObject() as unknown as PartnerLean), converted: true });
+    }
+
+    if (!input.firstName || !input.lastName || !input.phone || !input.password) {
+      throw new ApiError(
+        "No account uses that email yet. Add a first name, last name, phone and temporary password to create one.",
+        422,
+      );
+    }
+    const created = await User.create({
+      firstName: input.firstName,
+      lastName: input.lastName,
+      email: input.email,
+      phone: input.phone,
+      passwordHash: await hashPassword(input.password),
+      role: "customer",
+      partner: partnerPatch(input),
+    });
+    console.info(`[admin] ${me.email} created partner ${input.email}`);
+    return ok(res, { partner: serializePartner(created.toObject() as unknown as PartnerLean), converted: false }, 201);
+  }),
+);
+
+/** GET /api/admin/partners/:id: one partner with their full account. */
+adminRouter.get(
+  "/partners/:id",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+    const user = (await User.findById(req.params.id).lean()) as unknown as PartnerLean | null;
+    if (!user || !user.partner?.since) throw new ApiError("Partner not found.", 404);
+    const ledger = await getPartnerLedger(String(user._id));
+    return ok(res, {
+      partner: serializePartner(user, {
+        billed: ledger.billed,
+        paid: ledger.paid,
+        orderCount: ledger.orders.length,
+      }),
+      ledger,
+    });
+  }),
+);
+
+const partnerPatchSchema = partnerSettingsSchema.extend({ active: z.boolean().optional() });
+
+/** PATCH /api/admin/partners/:id: markup, credit limit, company, notes, on/off. */
+adminRouter.patch(
+  "/partners/:id",
+  asyncHandler(async (req, res) => {
+    requireAdmin(req);
+    await connectToDatabase();
+    const input = parse(partnerPatchSchema, req.body);
+    const user = await User.findById(req.params.id);
+    if (!user || !(user as unknown as PartnerLean).partner?.since) throw new ApiError("Partner not found.", 404);
+
+    const current = (user as unknown as PartnerLean).partner;
+    const next = partnerPatch(input, current);
+    next.active = input.active !== undefined ? input.active : Boolean(current?.active);
+    user.set("partner", next);
+    await user.save();
+
+    const ledger = await getPartnerLedger(String(user._id));
+    return ok(res, {
+      partner: serializePartner(user.toObject() as unknown as PartnerLean, {
+        billed: ledger.billed,
+        paid: ledger.paid,
+        orderCount: ledger.orders.length,
+      }),
+    });
+  }),
+);
+
+const partnerPaymentSchema = z.object({
+  amount: z.number().positive("Enter an amount").max(1_000_000_000),
+  method: z.enum(["transfer", "cash", "cheque", "other"]).default("transfer"),
+  reference: z.string().trim().max(120).optional(),
+  note: z.string().trim().max(500).optional(),
+  /** When the money was received. Defaults to now. */
+  receivedAt: z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).optional(),
+});
+
+/** POST /api/admin/partners/:id/payments: record a payment against the partner's balance. */
+adminRouter.post(
+  "/partners/:id/payments",
+  asyncHandler(async (req, res) => {
+    const admin = requireAdmin(req);
+    await connectToDatabase();
+    const input = parse(partnerPaymentSchema, req.body);
+    const user = await User.findById(req.params.id).select("firstName lastName partner").lean();
+    if (!user || !(user as unknown as PartnerLean).partner?.since) throw new ApiError("Partner not found.", 404);
+
+    const received = input.receivedAt ? new Date(input.receivedAt) : new Date();
+    if (Number.isNaN(received.getTime()) || received.getTime() > Date.now() + 24 * 3600_000) {
+      throw new ApiError("The date received can't be in the future.", 422);
+    }
+    const adminUser = await User.findById(admin.sub).select("firstName lastName").lean();
+
+    await PartnerPayment.create({
+      partner: String(user._id),
+      amount: input.amount,
+      method: input.method,
+      reference: input.reference || undefined,
+      note: input.note || undefined,
+      receivedAt: received,
+      recordedBy: admin.sub,
+      recordedByName: adminUser ? `${adminUser.firstName} ${adminUser.lastName}`.trim() : undefined,
+    });
+
+    const ledger = await getPartnerLedger(String(user._id));
+    void notify.partnerPaymentRecorded(String(user._id), input.amount, ledger.outstanding);
+    return ok(res, { ledger }, 201);
+  }),
+);
+
+/** DELETE /api/admin/partners/:id/payments/:paymentId: remove a payment entered by mistake. */
+adminRouter.delete(
+  "/partners/:id/payments/:paymentId",
+  asyncHandler(async (req, res) => {
+    const admin = requireAdmin(req);
+    await connectToDatabase();
+    const removed = await PartnerPayment.findOneAndDelete({
+      _id: req.params.paymentId,
+      partner: req.params.id,
+    });
+    if (!removed) throw new ApiError("Payment not found.", 404);
+    console.info(`[admin] ${admin.email} removed a ${removed.amount} payment for partner ${req.params.id}`);
+    return ok(res, { ledger: await getPartnerLedger(req.params.id) });
+  }),
+);
+
+const amountSchema = z.object({
+  total: z.number().min(0, "The amount can't be negative").max(1_000_000_000),
+  note: z.string().trim().min(3, "Say why the amount is changing").max(300),
+});
+
+/** PATCH /api/admin/bookings/:reference/amount: change what a partner order bills
+ *  (waive a returned order, agree a special price). Partner orders only. */
+adminRouter.patch(
+  "/bookings/:reference/amount",
+  asyncHandler(async (req, res) => {
+    const admin = requireAdmin(req);
+    await connectToDatabase();
+    const input = parse(amountSchema, req.body);
+
+    const booking = await Booking.findOne({ bookingReference: req.params.reference.toUpperCase() });
+    if (!booking) throw new ApiError("Booking not found.", 404);
+    if (booking.payment?.status !== "on_account") {
+      throw new ApiError("Only orders billed to a partner account can have their amount changed.", 409);
+    }
+    if (booking.status === "cancelled") throw new ApiError("This order was cancelled.", 409);
+
+    if (booking.pricing.originalTotal == null) booking.pricing.originalTotal = booking.pricing.total;
+    booking.pricing.total = input.total;
+    booking.pricing.adjustmentNote = input.note;
+    booking.pricing.adjustedAt = new Date();
+    booking.payment.amount = input.total;
+    await booking.save();
+    console.info(`[admin] ${admin.email} set ${booking.bookingReference} to ${input.total} (was ${booking.pricing.originalTotal})`);
+
+    return ok(res, { booking: serializeBooking(booking.toObject(), { includeCustomer: false }) });
   }),
 );
 
