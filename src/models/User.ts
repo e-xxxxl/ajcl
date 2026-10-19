@@ -15,7 +15,7 @@ const userSchema = new Schema(
     phone: { type: String, required: true, trim: true, maxlength: 30 },
     /** bcrypt hash — never selected by default. */
     passwordHash: { type: String, required: true, select: false },
-    role: { type: String, enum: ["customer", "admin", "rider"], default: "customer", index: true },
+    role: { type: String, enum: ["customer", "admin", "rider", "office_admin"], default: "customer", index: true },
     /** Elevated admin — can create other admins and delete bookings. */
     superAdmin: { type: Boolean, default: false },
     /** Only present when role === "rider". */

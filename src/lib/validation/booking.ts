@@ -69,6 +69,8 @@ const timeStr = z.string().regex(/^\d{2}:\d{2}$/, "Choose a time");
 
 export const priceQuoteSchema = routeInputSchema.extend({
   vehicleSlug: z.string().trim().min(1).optional(),
+  /** Quote the standard fare with no partner markup (a shipment's pickup is always charged this way). */
+  standardRate: z.boolean().optional(),
   clientRoute: clientRouteSchema,
 });
 

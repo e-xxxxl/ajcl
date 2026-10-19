@@ -24,6 +24,13 @@ function readCloudinary() {
   };
 }
 
+/** Terminal Africa base URL. Accepts the bare host (https://sandbox.terminal.africa) or a full /v1 URL. */
+function readTerminalUrl(): string {
+  const raw = get("TERMINAL_AFRICA_URL") ?? "https://api.terminal.africa";
+  const trimmed = raw.replace(/\/+$/, "");
+  return /\/v\d+$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
 export const env = {
   port: Number(process.env.PORT) || 4000,
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -73,6 +80,23 @@ export const env = {
   /** Proof photos are stored on Cloudinary when these are set (else in MongoDB). */
   cloudinary: { ...readCloudinary(), folder: get("CLOUDINARY_FOLDER") ?? "AJCL" },
 
+  /**
+   * Terminal Africa (interstate / international shipping). Server-side only, never sent to a browser.
+   * Point TERMINAL_AFRICA_URL at https://sandbox.terminal.africa to test, https://api.terminal.africa for live.
+   */
+  terminal: {
+    url: readTerminalUrl(),
+    secretKey: get("TERMINAL_AFRICA_SECRET_KEY"),
+    /** Needed by the wallet balance call; looked up automatically when unset. */
+    userId: get("TERMINAL_AFRICA_USER_ID"),
+    /** Signs incoming webhooks. Falls back to the secret key. */
+    webhookSecret: get("TERMINAL_AFRICA_WEBHOOK_SECRET") ?? get("TERMINAL_AFRICA_SECRET_KEY"),
+    /** The public address of this API, used when registering the webhook. Defaults to the address of the request. */
+    apiPublicUrl: get("API_PUBLIC_URL")?.replace(/\/+$/, ""),
+    /** Seconds between tracking polls for shipments webhooks may have missed (0 turns polling off). */
+    pollIntervalSeconds: Number(get("TERMINAL_POLL_SECONDS") ?? 900),
+  },
+
   /** Resend transactional email. */
   resendApiKey: get("RESEND_API_KEY"),
   /** "Name <address@domain>" — the sender address must be on a Resend-verified domain. */
@@ -81,10 +105,18 @@ export const env = {
   supportEmail: get("SUPPORT_EMAIL") ?? get("ADMIN_EMAIL") ?? "info@ajcourierlogistics.com",
 };
 
+/** "sk_test****0Mz3": enough to recognise a key in a log without exposing it. */
+export function maskSecret(value?: string | null): string {
+  if (!value) return "(not set)";
+  if (value.length <= 12) return "****";
+  return `${value.slice(0, 7)}****${value.slice(-4)}`;
+}
+
 export const isDatabaseConfigured = Boolean(env.mongodbUri);
 export const isMapsServerConfigured = Boolean(env.googleMapsServerKey);
 export const isPaystackConfigured = Boolean(env.paystackSecretKey);
 export const isEmailConfigured = Boolean(env.resendApiKey);
+export const isTerminalConfigured = Boolean(env.terminal.secretKey);
 export const isCloudinaryConfigured = Boolean(
   env.cloudinary.cloudName && env.cloudinary.apiKey && env.cloudinary.apiSecret,
 );

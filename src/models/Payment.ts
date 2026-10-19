@@ -7,7 +7,12 @@ import { Schema, model, models, type Model, type InferSchemaType } from "mongoos
  */
 const paymentSchema = new Schema(
   {
-    booking: { type: Schema.Types.ObjectId, ref: "Booking", required: true, index: true },
+    /** Set for local bookings and for a shipment's pickup fee. */
+    booking: { type: Schema.Types.ObjectId, ref: "Booking", index: true },
+    /** Set for a shipment's final shipping total (and its pickup fee, via the pickup booking). */
+    shipment: { type: Schema.Types.ObjectId, ref: "Shipment", index: true, sparse: true },
+    /** booking: a local delivery. pickup_fee: the rider's trip to our office. shipping_total: the carrier price. */
+    purpose: { type: String, enum: ["booking", "pickup_fee", "shipping_total"], default: "booking", index: true },
     user: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     provider: { type: String, default: "paystack" },
     reference: { type: String, required: true, unique: true, index: true },

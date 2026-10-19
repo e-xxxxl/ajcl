@@ -53,6 +53,8 @@ export function serializeBooking(
   const dto: BookingDTO = {
     id: id(b._id),
     bookingReference: b.bookingReference,
+    kind: (b.kind as BookingDTO["kind"]) ?? "local",
+    shipmentReference: b.shipmentReference ?? undefined,
     status: b.status as BookingDTO["status"],
     deliveryType: b.deliveryType as BookingDTO["deliveryType"],
     pickup: loc(b.pickup),

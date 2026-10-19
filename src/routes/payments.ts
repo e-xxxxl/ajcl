@@ -45,10 +45,21 @@ paymentsRouter.get(
     }
 
     const outcome = await verifyAndReconcile(reference, "callback");
+    if (!outcome.booking) {
+      // A shipment's carrier price has no booking behind it.
+      const { serializeOne } = await import("../lib/services/shipments");
+      return ok(res, {
+        paid: outcome.paid,
+        status: outcome.status,
+        booking: null,
+        shipment: outcome.shipment ? await serializeOne(outcome.shipment) : null,
+      });
+    }
     return ok(res, {
       paid: outcome.paid,
       status: outcome.status,
       booking: serializeBooking(outcome.booking.toObject()),
+      shipmentReference: outcome.booking.shipmentReference ?? undefined,
     });
   }),
 );

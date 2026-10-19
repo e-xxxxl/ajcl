@@ -47,7 +47,10 @@ adminRouter.post(
     const valid = user ? await verifyPassword(input.password, user.passwordHash) : false;
 
     if (!user || !valid) throw new ApiError("Incorrect email or password.", 401);
-    if (user.role !== "admin") throw new ApiError("This account does not have admin access.", 403);
+    if (user.role !== "admin" && user.role !== "office_admin") {
+      throw new ApiError("This account does not have admin access.", 403);
+    }
+    const sessionRole = user.role;
 
     user.lastLoginAt = new Date();
     await user.save();
@@ -56,7 +59,7 @@ adminRouter.post(
     const token = await signSession(
       {
         sub: String(user._id),
-        role: "admin",
+        role: sessionRole,
         email: user.email,
         name: `${user.firstName} ${user.lastName}`.trim(),
         superAdmin,
@@ -73,7 +76,7 @@ adminRouter.post(
         fullName: `${user.firstName} ${user.lastName}`.trim(),
         email: user.email,
         phone: user.phone,
-        role: "admin" as const,
+        role: sessionRole,
         superAdmin,
       },
     });
@@ -457,6 +460,8 @@ const createAdminSchema = z.object({
     .regex(/[A-Z]/, "Add an uppercase letter")
     .regex(/[0-9]/, "Add a number"),
   superAdmin: z.boolean().optional().default(false),
+  /** "office_admin" can only work the shipments desk. */
+  role: z.enum(["admin", "office_admin"]).optional().default("admin"),
 });
 
 function serializeAdmin(u: {
@@ -465,6 +470,7 @@ function serializeAdmin(u: {
   lastName: string;
   email: string;
   phone: string;
+  role?: string;
   superAdmin?: boolean;
   lastLoginAt?: Date | null;
   createdAt?: Date | string;
@@ -476,6 +482,7 @@ function serializeAdmin(u: {
     fullName: `${u.firstName} ${u.lastName}`.trim(),
     email: u.email,
     phone: u.phone,
+    role: u.role === "office_admin" ? "office_admin" : "admin",
     superAdmin: Boolean(u.superAdmin),
     lastLoginAt: u.lastLoginAt ? new Date(u.lastLoginAt).toISOString() : null,
     createdAt: u.createdAt ? new Date(u.createdAt as string).toISOString() : null,
@@ -488,7 +495,9 @@ adminRouter.get(
   asyncHandler(async (req, res) => {
     requireSuperAdmin(req);
     await connectToDatabase();
-    const admins = await User.find({ role: "admin" }).sort({ createdAt: 1 }).lean();
+    const admins = await User.find({ role: { $in: ["admin", "office_admin"] } })
+      .sort({ createdAt: 1 })
+      .lean();
     return ok(res, { admins: admins.map(serializeAdmin) });
   }),
 );
@@ -511,10 +520,10 @@ adminRouter.post(
       email: input.email,
       phone: input.phone || "0000000000",
       passwordHash: await hashPassword(input.password),
-      role: "admin",
-      superAdmin: input.superAdmin,
+      role: input.role,
+      superAdmin: input.role === "admin" ? input.superAdmin : false,
     });
-    console.info(`[admin] ${me.email} created admin ${input.email}`);
+    console.info(`[admin] ${me.email} created ${input.role} ${input.email}`);
 
     return ok(res, { admin: serializeAdmin(admin.toObject()) }, 201);
   }),
@@ -531,7 +540,9 @@ adminRouter.delete(
       throw new ApiError("You can't remove your own admin account.", 400);
     }
     const target = await User.findById(req.params.id);
-    if (!target || target.role !== "admin") throw new ApiError("Admin not found.", 404);
+    if (!target || (target.role !== "admin" && target.role !== "office_admin")) {
+      throw new ApiError("Admin not found.", 404);
+    }
 
     await User.deleteOne({ _id: target._id });
     console.info(`[admin] ${me.email} removed admin ${target.email}`);

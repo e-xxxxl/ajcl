@@ -45,6 +45,11 @@ export async function activateOrder(
   const assigned = await autoAssignBooking(String(finalBooking._id));
   if (assigned) finalBooking = assigned;
 
+  if (finalBooking.kind === "shipment_pickup") {
+    const { onPickupFunded } = await import("./shipments");
+    await onPickupFunded(finalBooking);
+  }
+
   if (justConfirmed) {
     await notifyAdminsOfNewOrder(finalBooking, {
       onAccount: opts.onAccount,

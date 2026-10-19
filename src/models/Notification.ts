@@ -18,6 +18,17 @@ export const NOTIFICATION_TYPES = [
   "admin_handover_flagged",
   "booking_returned",
   "partner_payment_recorded",
+  "shipment_created",
+  "shipment_received",
+  "shipment_quote_ready",
+  "shipment_paid",
+  "shipment_booked",
+  "shipment_in_transit",
+  "shipment_delivered",
+  "shipment_failed",
+  "admin_shipment_new",
+  "admin_shipment_booking_failed",
+  "admin_wallet_low",
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];

@@ -2,9 +2,11 @@ import { connectToDatabase } from "../db";
 import { Booking, type BookingHydrated } from "../../models/Booking";
 import { Payment } from "../../models/Payment";
 import { Vehicle } from "../../models/Vehicle";
+import type { ShipmentHydrated } from "../../models/Shipment";
 import { User } from "../../models/User";
 import { ApiError } from "../api";
 import { env } from "../env";
+import { siteUrl } from "../origins";
 import { calculatePrice, toMinorUnits } from "../pricing/engine";
 import { computeRouteMetrics, bookingToRouteInput } from "./quote";
 import { changeBookingStatus } from "./booking";
@@ -87,7 +89,10 @@ export async function initializeBookingPayment(
     throw new ApiError("This booking was cancelled.", 409);
   }
   const owner = await User.findById(userId).select("partner").lean();
-  if (isActivePartner(owner as { partner?: { active?: boolean | null } } | null)) {
+  if (
+    booking.kind !== "shipment_pickup" &&
+    isActivePartner(owner as { partner?: { active?: boolean | null } } | null)
+  ) {
     throw new ApiError(
       "Your orders are billed to your partner account, so there is nothing to pay online.",
       409,
@@ -134,7 +139,7 @@ export async function initializeBookingPayment(
     amountMinor,
     reference: txReference,
     currency: booking.pricing.currency,
-    callbackUrl: `${env.frontendUrl}/book/payment/callback?ref=${booking.bookingReference}`,
+    callbackUrl: `${siteUrl()}/book/payment/callback?ref=${booking.bookingReference}`,
     metadata: {
       bookingReference: booking.bookingReference,
       bookingId: String(booking._id),
@@ -160,6 +165,9 @@ export async function initializeBookingPayment(
 
   await Payment.create({
     booking: booking._id,
+    ...(booking.kind === "shipment_pickup"
+      ? { shipment: booking.shipment, purpose: "pickup_fee" as const }
+      : {}),
     user: userId,
     reference: init.reference,
     accessCode: init.accessCode,
@@ -176,8 +184,10 @@ export async function initializeBookingPayment(
   };
 }
 
-type ReconcileOutcome = {
-  booking: BookingHydrated;
+export type ReconcileOutcome = {
+  /** Null when the payment was for a shipment's carrier price (no booking behind it). */
+  booking: BookingHydrated | null;
+  shipment?: ShipmentHydrated | null;
   paid: boolean;
   status: string;
 };
@@ -194,6 +204,13 @@ export async function reconcilePayment(
   await connectToDatabase();
 
   const ledger = await Payment.findOne({ reference: verification.reference });
+
+  // The carrier price of an interstate / international shipment has no booking behind it.
+  if (ledger?.purpose === "shipping_total") {
+    const { reconcileShippingPayment } = await import("./shipment-payment");
+    return reconcileShippingPayment(ledger, verification, via);
+  }
+
   const booking = ledger
     ? await Booking.findById(ledger.booking)
     : await Booking.findOne({ "payment.reference": verification.reference });

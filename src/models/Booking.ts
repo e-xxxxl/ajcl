@@ -220,6 +220,12 @@ const bookingSchema = new Schema(
 
     handover: { type: handoverSchema, default: () => ({}) },
 
+    /** "local" is the normal Rider's App delivery. "shipment_pickup" brings an interstate /
+     *  international parcel to our office and belongs to a Shipment. */
+    kind: { type: String, enum: ["local", "shipment_pickup"], default: "local", index: true },
+    shipment: { type: Schema.Types.ObjectId, ref: "Shipment", index: true, sparse: true },
+    shipmentReference: { type: String, trim: true },
+
     cancelledReason: { type: String, trim: true, maxlength: 500 },
     returnedAt: { type: Date },
     returnReason: { type: String, trim: true, maxlength: 60 },

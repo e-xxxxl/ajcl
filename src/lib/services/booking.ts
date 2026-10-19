@@ -45,6 +45,7 @@ function combineDateTime(date: string, time: string): Date {
 export async function createBooking(
   userId: string,
   input: CreateBookingInput,
+  opts: { shipment?: { id: string; reference: string } } = {},
 ): Promise<BookingHydrated> {
   await connectToDatabase();
 
@@ -85,7 +86,8 @@ export async function createBooking(
       stopCount: metrics.stopCount,
       estimatedDurationSeconds: metrics.estimatedDurationSeconds,
     },
-    await getPartnerMarkup(userId),
+    // A shipment pickup is always charged the standard fare, even to a partner.
+    opts.shipment ? 0 : await getPartnerMarkup(userId),
   );
 
   const now = new Date();
@@ -94,6 +96,9 @@ export async function createBooking(
   const booking = await Booking.create({
     bookingReference: reference,
     user: userId,
+    ...(opts.shipment
+      ? { kind: "shipment_pickup", shipment: opts.shipment.id, shipmentReference: opts.shipment.reference }
+      : {}),
     pickup: input.pickup,
     stops: input.stops,
     destination: input.destination,
@@ -138,10 +143,13 @@ export async function createBooking(
     at: now,
   });
 
-  await notify.bookingCreated(userId, booking, {
-    email: input.sender.email || undefined,
-    phone: input.sender.phone,
-  });
+  // A shipment's pickup is announced by the shipment itself.
+  if (!opts.shipment) {
+    await notify.bookingCreated(userId, booking, {
+      email: input.sender.email || undefined,
+      phone: input.sender.phone,
+    });
+  }
 
   return booking;
 }
@@ -243,6 +251,13 @@ export async function changeBookingStatus(params: {
     detail: to === "returned" ? returnDetail(booking.returnReason, booking.returnNote) : undefined,
   });
   if (to === "driver_assigned") await sendRiderAssignedEmails(booking._id);
+
+  // A shipment's pickup leg keeps its shipment's status in step.
+  if (booking.kind === "shipment_pickup") {
+    void import("./shipments")
+      .then((m) => m.syncShipmentFromPickup(booking, to))
+      .catch((err) => console.error("[shipments] pickup sync failed", err));
+  }
 
   // A cancelled or returned job frees its rider. Let a waiting booking take their place.
   // (Imported lazily: the auto-assign engine itself calls this function.)

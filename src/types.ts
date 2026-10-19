@@ -9,7 +9,7 @@ export type SessionUser = {
   fullName: string;
   email: string;
   phone: string;
-  role: "customer" | "admin" | "rider";
+  role: "customer" | "admin" | "rider" | "office_admin";
   superAdmin?: boolean;
   /** Present for partner accounts: orders are billed to the account instead of paid in the app. */
   partner?: { active: true; company?: string };
@@ -125,6 +125,9 @@ export type HandoverStatusDTO = {
 export type BookingDTO = {
   id: string;
   bookingReference: string;
+  /** "shipment_pickup" is the rider trip that brings an interstate / international parcel to our office. */
+  kind?: "local" | "shipment_pickup";
+  shipmentReference?: string;
   status: BookingStatus;
   deliveryType: DeliveryType;
   pickup: LocationDTO;

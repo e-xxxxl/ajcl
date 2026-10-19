@@ -25,7 +25,7 @@ bookingsRouter.post(
     const session = requireSession(req);
     enforceRateLimit(req, "quote", { limit: 40, windowMs: 60 * 1000 });
 
-    const { clientRoute, ...input } = parse(priceQuoteSchema, req.body);
+    const { clientRoute, standardRate, ...input } = parse(priceQuoteSchema, req.body);
     try {
       assertRoutable(input);
     } catch (e) {
@@ -33,7 +33,8 @@ bookingsRouter.post(
     }
 
     // Partners are quoted their own price (the admin's markup is applied; the percentage is never sent).
-    const quote = await buildQuote(input, { clientRoute }, await getPartnerMarkup(session.sub));
+    const markup = standardRate ? 0 : await getPartnerMarkup(session.sub);
+    const quote = await buildQuote(input, { clientRoute }, markup);
     return ok(res, quote);
   }),
 );

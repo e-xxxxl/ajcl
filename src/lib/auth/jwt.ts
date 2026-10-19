@@ -7,7 +7,7 @@ const ISSUER = "ajcl";
 
 export type SessionClaims = {
   sub: string; // user id
-  role: "customer" | "admin" | "rider";
+  role: "customer" | "admin" | "rider" | "office_admin";
   email: string;
   name: string;
   /** Admins with elevated rights (create admins, delete bookings). */
@@ -76,7 +76,10 @@ export async function verifySession(token: string): Promise<SessionClaims | null
     const { payload } = await jwtVerify(token, secret, { issuer: ISSUER });
     if (
       typeof payload.sub === "string" &&
-      (payload.role === "customer" || payload.role === "admin" || payload.role === "rider") &&
+      (payload.role === "customer" ||
+        payload.role === "admin" ||
+        payload.role === "rider" ||
+        payload.role === "office_admin") &&
       typeof payload.email === "string"
     ) {
       return {

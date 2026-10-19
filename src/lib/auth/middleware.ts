@@ -59,6 +59,13 @@ export function requireAdmin(req: Request): SessionClaims {
   return session;
 }
 
+/** Anyone who works at the office: Office Admins, and admins (who can do everything an Office Admin can). */
+export function requireOffice(req: Request): SessionClaims {
+  const session = requireSession(req);
+  if (session.role !== "admin" && session.role !== "office_admin") throw new ForbiddenError();
+  return session;
+}
+
 export function requireRider(req: Request): SessionClaims {
   const session = requireSession(req);
   if (session.role !== "rider") throw new ForbiddenError();
@@ -97,7 +104,7 @@ export async function getCurrentUser(req: Request): Promise<SessionUser | null> 
       fullName: `${user.firstName} ${user.lastName}`.trim(),
       email: user.email,
       phone: user.phone,
-      role: u.role as "customer" | "admin" | "rider",
+      role: u.role as "customer" | "admin" | "rider" | "office_admin",
       superAdmin: Boolean(u.superAdmin),
       partner: partnerPublic(u),
       rider:
