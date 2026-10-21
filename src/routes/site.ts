@@ -3,11 +3,19 @@ import { z } from "zod";
 import { ok, asyncHandler, parse, ApiError } from "../lib/api";
 import { requireSuperAdmin } from "../lib/auth/middleware";
 import { connectToDatabase } from "../lib/db";
-import { SiteAsset, PriceList } from "../models";
+import { SiteAsset, PriceList, Flyer, CargoEnquiry } from "../models";
+import { enforceRateLimit } from "../lib/rate-limit";
+import { sendEmail } from "../lib/email/send";
+import { renderEmail } from "../lib/email/templates";
+import { site } from "../config/site";
 import {
   SLIDE_KEYS,
   getSlides,
   getAirCargo,
+  getSeaCargo,
+  getLiveFlyers,
+  listFlyersForAdmin,
+  flyerView,
   getExpress,
   getSeaFlier,
   getLatestPriceList,
@@ -18,6 +26,8 @@ import {
   DEFAULT_SLIDES,
   DEFAULT_AIR_CARGO,
   DEFAULT_EXPRESS,
+  DEFAULT_SEA_CARGO,
+  DEFAULT_CARGO_NOTES,
 } from "../lib/services/site-content";
 import { getShippingSettings } from "../lib/services/shipping-settings";
 import { publicShippingConfig } from "./shipments";
@@ -28,17 +38,83 @@ export const siteRouter = Router();
 siteRouter.get(
   "/home",
   asyncHandler(async (_req, res) => {
-    const [slides, seaFlier, priceList, config] = await Promise.all([
+    const [slides, seaFlier, priceList, config, flyers] = await Promise.all([
       getSlides(),
       getSeaFlier(),
       getLatestPriceList(),
       publicShippingConfig(),
+      getLiveFlyers().catch(() => []),
     ]);
-    return ok(res, { slides: slides.filter((s) => s.active), seaFlier, priceList, disclaimerParagraphs: config.disclaimerParagraphs });
+    res.setHeader("Cache-Control", "no-store");
+    return ok(res, { slides: slides.filter((s) => s.active), seaFlier, priceList, disclaimerParagraphs: config.disclaimerParagraphs, flyers });
   }),
 );
 
 siteRouter.get("/air-cargo", asyncHandler(async (_req, res) => ok(res, { page: await getAirCargo() })));
+
+siteRouter.get("/sea-cargo", asyncHandler(async (_req, res) => ok(res, { page: await getSeaCargo() })));
+
+const enquirySchema = z.object({
+  service: z.enum(["air", "sea"]),
+  fullName: z.string().trim().min(2, "Enter your full name").max(120),
+  address: z.string().trim().min(5, "Enter your address").max(300),
+  email: z.string().trim().toLowerCase().email("Enter a valid email address").max(200),
+  phone: z
+    .string()
+    .trim()
+    .regex(/^[+\d][\d\s()-]{6,24}$/, "Enter a valid phone number"),
+  destination: z.string().trim().min(2, "Enter the destination").max(160),
+  items: z.string().trim().min(3, "List the items you want to ship").max(3000),
+  /** Hidden field: real visitors leave it empty. */
+  website: z.string().optional(),
+});
+
+/** POST /api/site/cargo-enquiry: the Air Cargo and Sea Cargo contact form. Goes to the office inbox. */
+siteRouter.post(
+  "/cargo-enquiry",
+  asyncHandler(async (req, res) => {
+    enforceRateLimit(req, "cargo-enquiry", { limit: 5, windowMs: 10 * 60 * 1000 });
+    const input = parse(enquirySchema, req.body);
+    if (input.website) return ok(res, { received: true }, 201); // a bot filled the hidden field: pretend it worked
+
+    await connectToDatabase();
+    const record = await CargoEnquiry.create({
+      service: input.service,
+      fullName: input.fullName,
+      address: input.address,
+      email: input.email,
+      phone: input.phone,
+      destination: input.destination,
+      items: input.items,
+    });
+
+    const label = input.service === "air" ? "Air cargo" : "Sea cargo";
+    const { html, text } = renderEmail({
+      preview: `${label} enquiry from ${input.fullName}`,
+      heading: `New ${label.toLowerCase()} enquiry`,
+      paragraphs: [
+        `Full name: ${input.fullName}`,
+        `Address: ${input.address}`,
+        `Email: ${input.email}`,
+        `Phone number: ${input.phone}`,
+        `Destination: ${input.destination}`,
+        `List of items:\n${input.items}`,
+      ],
+      footerNote: "Sent from the website enquiry form. Reply to this email to answer the customer.",
+    });
+    const emailed = await sendEmail({
+      to: site.contact.email,
+      subject: `${label} enquiry: ${input.fullName} to ${input.destination}`,
+      html,
+      text,
+      replyTo: input.email,
+    });
+    if (emailed) await CargoEnquiry.updateOne({ _id: record._id }, { emailed: true });
+    else console.warn(`[cargo-enquiry] ${record._id} saved but the email to ${site.contact.email} was not sent`);
+
+    return ok(res, { received: true }, 201);
+  }),
+);
 
 siteRouter.get(
   "/express",
@@ -77,9 +153,11 @@ siteAdminRouter.get(
   "/content",
   asyncHandler(async (req, res) => {
     requireSuperAdmin(req);
-    const [slides, air, express, flier, latest, history, settings] = await Promise.all([
+    const [slides, air, sea, flyers, express, flier, latest, history, settings] = await Promise.all([
       getSlides(),
       getAirCargo(),
+      getSeaCargo(),
+      listFlyersForAdmin(),
       getExpress(),
       getSeaFlier(),
       getLatestPriceList(),
@@ -88,8 +166,10 @@ siteAdminRouter.get(
     ]);
     return ok(res, {
       slides,
-      defaults: { slides: DEFAULT_SLIDES, airCargo: DEFAULT_AIR_CARGO, express: DEFAULT_EXPRESS },
+      defaults: { slides: DEFAULT_SLIDES, airCargo: DEFAULT_AIR_CARGO, seaCargo: DEFAULT_SEA_CARGO, express: DEFAULT_EXPRESS, notes: DEFAULT_CARGO_NOTES },
       airCargo: air,
+      seaCargo: sea,
+      flyers,
       express: { title: express.title, intro: express.intro, paragraphs: express.paragraphs },
       seaFlier: flier,
       priceList: latest,
@@ -123,6 +203,15 @@ const contentSchema = z.object({
       title: z.string().trim().max(120).optional(),
       intro: z.string().trim().max(1200).optional(),
       sections: z.array(z.object({ heading: z.string().trim().max(120), body: z.string().trim().max(2000) })).max(12).optional(),
+      notes: z.array(z.string().trim().min(1).max(1500)).max(8).optional(),
+    })
+    .optional(),
+  seaCargo: z
+    .object({
+      title: z.string().trim().max(120).optional(),
+      intro: z.string().trim().max(1200).optional(),
+      sections: z.array(z.object({ heading: z.string().trim().max(120), body: z.string().trim().max(2000) })).max(12).optional(),
+      notes: z.array(z.string().trim().min(1).max(1500)).max(8).optional(),
     })
     .optional(),
   express: z
@@ -156,12 +245,18 @@ siteAdminRouter.put(
         else doc.slides.push(next as never);
       }
     }
+    // Set field by field: replacing the whole block would also wipe the uploaded rate card.
     if (input.airCargo) {
-      doc.set("airCargo", {
-        title: input.airCargo.title || undefined,
-        intro: input.airCargo.intro || undefined,
-        sections: input.airCargo.sections?.length ? input.airCargo.sections : undefined,
-      });
+      doc.set("airCargo.title", input.airCargo.title || undefined);
+      doc.set("airCargo.intro", input.airCargo.intro || undefined);
+      doc.set("airCargo.sections", input.airCargo.sections?.length ? input.airCargo.sections : undefined);
+      if (input.airCargo.notes) doc.set("airCargo.notes", input.airCargo.notes.length ? input.airCargo.notes : undefined);
+    }
+    if (input.seaCargo) {
+      doc.set("seaCargo.title", input.seaCargo.title || undefined);
+      doc.set("seaCargo.intro", input.seaCargo.intro || undefined);
+      doc.set("seaCargo.sections", input.seaCargo.sections?.length ? input.seaCargo.sections : undefined);
+      if (input.seaCargo.notes) doc.set("seaCargo.notes", input.seaCargo.notes.length ? input.seaCargo.notes : undefined);
     }
     if (input.express) {
       doc.set("express", {
@@ -176,7 +271,7 @@ siteAdminRouter.put(
 );
 
 const assetSchema = z.object({
-  purpose: z.enum(["slide", "flier"]),
+  purpose: z.enum(["slide", "flier", "air_rate_card"]),
   slideKey: z.enum(SLIDE_KEYS as [string, ...string[]]).optional(),
   filename: z.string().trim().max(160).optional(),
   dataUrl: z.string().min(50),
@@ -209,6 +304,9 @@ siteAdminRouter.post(
     if (input.purpose === "flier") {
       previous = doc.seaFlier;
       doc.seaFlier = asset._id as never;
+    } else if (input.purpose === "air_rate_card") {
+      previous = doc.airCargo?.rateCard;
+      doc.set("airCargo.rateCard", asset._id);
     } else {
       let slide = doc.slides.find((s) => s.key === input.slideKey);
       if (!slide) {
@@ -234,6 +332,9 @@ siteAdminRouter.delete(
     if (req.params.purpose === "flier") {
       previous = doc.seaFlier;
       doc.seaFlier = undefined;
+    } else if (req.params.purpose === "air_rate_card") {
+      previous = doc.airCargo?.rateCard;
+      doc.set("airCargo.rateCard", undefined);
     } else if (req.params.purpose === "slide") {
       const slide = doc.slides.find((s) => s.key === req.params.key);
       previous = slide?.imageAsset;
@@ -289,5 +390,109 @@ siteAdminRouter.post(
       uploadedByName: session.name,
     });
     return ok(res, { priceList: { id: String(list._id), monthLabel, effectiveMonth: input.effectiveMonth } }, 201);
+  }),
+);
+
+/* ── Pop-up flyers ─────────────────────────────────────────────────────── */
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const linkField = z
+  .string()
+  .trim()
+  .max(300)
+  .refine((v) => !v || /^\/(?!\/)/.test(v) || /^https:\/\//i.test(v), "Use a page on this site (like /send) or an https:// address");
+
+const flyerCreateSchema = z.object({
+  title: z.string().trim().max(120).optional(),
+  linkUrl: linkField.optional(),
+  durationDays: z.coerce.number().int().min(1, "Choose at least 1 day").max(365, "The longest is 365 days"),
+  /** When it starts showing. Leave out to start now. */
+  startsAt: z.string().datetime().optional(),
+  filename: z.string().trim().max(160).optional(),
+  dataUrl: z.string().min(50),
+});
+
+siteAdminRouter.get(
+  "/flyers",
+  asyncHandler(async (req, res) => {
+    requireSuperAdmin(req);
+    return ok(res, { flyers: await listFlyersForAdmin() });
+  }),
+);
+
+/** POST /api/admin/site/flyers: upload a pop-up flyer and choose how long it shows. */
+siteAdminRouter.post(
+  "/flyers",
+  asyncHandler(async (req, res) => {
+    const session = requireSuperAdmin(req);
+    const input = parse(flyerCreateSchema, req.body);
+    await connectToDatabase();
+    const { contentType, buffer } = decodeDataUrl(input.dataUrl, ["image/jpeg", "image/png", "image/webp"], 4_000_000);
+
+    const startsAt = input.startsAt ? new Date(input.startsAt) : new Date();
+    const asset = await SiteAsset.create({
+      purpose: "popup",
+      filename: input.filename,
+      contentType,
+      size: buffer.length,
+      data: buffer,
+      storage: "mongo",
+      uploadedBy: session.sub,
+    });
+    const flyer = await Flyer.create({
+      title: input.title ?? "",
+      asset: asset._id,
+      linkUrl: input.linkUrl || undefined,
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + input.durationDays * DAY_MS),
+      durationDays: input.durationDays,
+      active: true,
+      createdBy: session.sub,
+    });
+    return ok(res, { flyer: flyerView(flyer) }, 201);
+  }),
+);
+
+const flyerPatchSchema = z.object({
+  title: z.string().trim().max(120).optional(),
+  linkUrl: linkField.optional(),
+  durationDays: z.coerce.number().int().min(1).max(365).optional(),
+  startsAt: z.string().datetime().optional(),
+  active: z.boolean().optional(),
+});
+
+/** PATCH /api/admin/site/flyers/:id: change the wording, link, schedule, or switch it off. */
+siteAdminRouter.patch(
+  "/flyers/:id",
+  asyncHandler(async (req, res) => {
+    requireSuperAdmin(req);
+    if (!/^[a-f0-9]{24}$/i.test(req.params.id)) throw new ApiError("Flyer not found.", 404);
+    const input = parse(flyerPatchSchema, req.body);
+    await connectToDatabase();
+    const flyer = await Flyer.findById(req.params.id);
+    if (!flyer) throw new ApiError("Flyer not found.", 404);
+
+    if (input.title !== undefined) flyer.title = input.title;
+    if (input.linkUrl !== undefined) flyer.linkUrl = input.linkUrl || undefined;
+    if (input.active !== undefined) flyer.active = input.active;
+    if (input.startsAt) flyer.startsAt = new Date(input.startsAt);
+    if (input.durationDays) flyer.durationDays = input.durationDays;
+    if (input.startsAt || input.durationDays) flyer.endsAt = new Date(flyer.startsAt.getTime() + flyer.durationDays * DAY_MS);
+    await flyer.save();
+    return ok(res, { flyer: flyerView(flyer) });
+  }),
+);
+
+siteAdminRouter.delete(
+  "/flyers/:id",
+  asyncHandler(async (req, res) => {
+    requireSuperAdmin(req);
+    if (!/^[a-f0-9]{24}$/i.test(req.params.id)) throw new ApiError("Flyer not found.", 404);
+    await connectToDatabase();
+    const flyer = await Flyer.findByIdAndDelete(req.params.id);
+    if (!flyer) throw new ApiError("Flyer not found.", 404);
+    await SiteAsset.deleteOne({ _id: flyer.asset as unknown as string }).catch(() => undefined);
+    return ok(res, { removed: true });
   }),
 );

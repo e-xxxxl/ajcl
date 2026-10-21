@@ -1,5 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont } from "pdf-lib";
-import { SiteContent, SiteAsset, PriceList } from "../../models";
+import { SiteContent, SiteAsset, PriceList, Flyer } from "../../models";
 import { ApiError } from "../api";
 import { connectToDatabase } from "../db";
 import { getShippingSettings } from "./shipping-settings";
@@ -73,6 +73,22 @@ export const DEFAULT_AIR_CARGO = {
   ],
 };
 
+/** Shown under the enquiry form on the Air Cargo and Sea Cargo pages until the Super Admin changes it. */
+export const DEFAULT_CARGO_NOTES = [
+  "Please note that before your shipment is finalised and payment made, you will be required to fill the export goods declaration form which will be made available after necessary compliance checks.",
+  "A completely filled and signed form with terms and conditions duly agreed upon validates a successful shipment.",
+];
+
+export const DEFAULT_SEA_CARGO = {
+  title: "Sea cargo",
+  intro: "The economical way to move large volumes overseas. Our current rate card sets out the prices.",
+  sections: [
+    { heading: "Suited to large volumes", body: "Sea freight makes the most sense for bulky or heavy consignments that are not urgent." },
+    { heading: "A lower cost per kilo", body: "Moving more by sea costs less per kilo than flying it." },
+    { heading: "Handled for you", body: "Tell us what you are shipping and we advise on the best way to send it." },
+  ],
+};
+
 export const DEFAULT_EXPRESS = {
   title: "AJCL Express",
   intro:
@@ -114,6 +130,15 @@ export async function getSlides() {
   });
 }
 
+export type PublicDocument = { url: string; downloadUrl: string; contentType: string; filename: string };
+
+async function describeAsset(id: unknown, fallbackName: string): Promise<PublicDocument | null> {
+  if (!id) return null;
+  const asset = await SiteAsset.findById(id).select("contentType filename").lean();
+  if (!asset) return null;
+  return { url: assetUrl(id), downloadUrl: `${assetUrl(id)}?download=1`, contentType: asset.contentType, filename: asset.filename ?? fallbackName };
+}
+
 export async function getAirCargo() {
   const doc = await getSiteContentDoc();
   return {
@@ -122,7 +147,70 @@ export async function getAirCargo() {
     sections: doc.airCargo?.sections?.length
       ? doc.airCargo.sections.map((s) => ({ heading: s.heading ?? "", body: s.body ?? "" }))
       : DEFAULT_AIR_CARGO.sections,
+    rateCard: await describeAsset(doc.airCargo?.rateCard, "air-cargo-rate-card"),
+    notes: doc.airCargo?.notes?.length ? doc.airCargo.notes : DEFAULT_CARGO_NOTES,
   };
+}
+
+export async function getSeaCargo() {
+  const doc = await getSiteContentDoc();
+  return {
+    title: doc.seaCargo?.title || DEFAULT_SEA_CARGO.title,
+    intro: doc.seaCargo?.intro || DEFAULT_SEA_CARGO.intro,
+    sections: doc.seaCargo?.sections?.length
+      ? doc.seaCargo.sections.map((s) => ({ heading: s.heading ?? "", body: s.body ?? "" }))
+      : DEFAULT_SEA_CARGO.sections,
+    // The sea cargo rate card is the same file as the homepage "flier".
+    rateCard: await describeAsset(doc.seaFlier, "sea-cargo-rate-card"),
+    notes: doc.seaCargo?.notes?.length ? doc.seaCargo.notes : DEFAULT_CARGO_NOTES,
+  };
+}
+
+/* ── Pop-up flyers ─────────────────────────────────────────────────────── */
+
+export type FlyerView = {
+  id: string;
+  title: string;
+  imageUrl: string;
+  linkUrl: string | null;
+  startsAt: string;
+  endsAt: string;
+  durationDays: number;
+  active: boolean;
+  status: "live" | "scheduled" | "expired" | "off";
+};
+
+export function flyerView(
+  f: { _id: unknown; title?: string; asset: unknown; linkUrl?: string | null; startsAt: Date; endsAt: Date; durationDays: number; active?: boolean },
+  now = new Date(),
+): FlyerView {
+  const status: FlyerView["status"] = f.active === false ? "off" : f.endsAt <= now ? "expired" : f.startsAt > now ? "scheduled" : "live";
+  return {
+    id: String(f._id),
+    title: f.title ?? "",
+    imageUrl: assetUrl(f.asset),
+    linkUrl: f.linkUrl || null,
+    startsAt: f.startsAt.toISOString(),
+    endsAt: f.endsAt.toISOString(),
+    durationDays: f.durationDays,
+    active: f.active !== false,
+    status,
+  };
+}
+
+/** The flyers visitors should see right now, newest first. */
+export async function getLiveFlyers(): Promise<FlyerView[]> {
+  await connectToDatabase();
+  const now = new Date();
+  const list = await Flyer.find({ active: true, startsAt: { $lte: now }, endsAt: { $gt: now } }).sort({ startsAt: -1 }).limit(5).lean();
+  return list.map((f) => flyerView(f, now));
+}
+
+export async function listFlyersForAdmin(): Promise<FlyerView[]> {
+  await connectToDatabase();
+  const list = await Flyer.find({}).sort({ createdAt: -1 }).limit(60).lean();
+  const now = new Date();
+  return list.map((f) => flyerView(f, now));
 }
 
 export async function getLatestPriceList() {

@@ -18,3 +18,5 @@ export { ShippingSettings, type ShippingSettingsDoc } from "./ShippingSettings";
 export { SiteAsset, type SiteAssetDoc } from "./SiteAsset";
 export { PriceList, type PriceListDoc } from "./PriceList";
 export { SiteContent, type SiteContentDoc } from "./SiteContent";
+export { Flyer, type FlyerDoc } from "./Flyer";
+export { CargoEnquiry, type CargoEnquiryDoc } from "./CargoEnquiry";

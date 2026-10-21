@@ -7,7 +7,7 @@ import { Schema, model, models, type Model, type InferSchemaType } from "mongoos
  */
 const siteAssetSchema = new Schema(
   {
-    purpose: { type: String, enum: ["slide", "flier", "price_list"], required: true, index: true },
+    purpose: { type: String, enum: ["slide", "flier", "price_list", "popup", "air_rate_card"], required: true, index: true },
     filename: { type: String, trim: true, maxlength: 200 },
     contentType: { type: String, required: true },
     size: { type: Number, required: true },

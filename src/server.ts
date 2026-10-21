@@ -58,7 +58,7 @@ app.use("/api/payments/webhook", express.raw({ type: "*/*" }));
 // Terminal Africa signs the exact bytes it sends, so its webhook needs the raw body too.
 app.use("/api/terminal/webhook", express.raw({ type: "*/*" }));
 // Super Admin uploads (slide images, the sea flier, price list PDFs) arrive as base64.
-app.use(/^\/api\/admin\/site\/(assets|price-lists)\/?$/, express.json({ limit: "12mb" }));
+app.use(/^\/api\/admin\/site\/(assets|price-lists|flyers)\/?$/, express.json({ limit: "12mb" }));
 // Proof photos arrive as base64 on the rider's pickup/delivery confirm calls. Give only
 // those two routes a bigger body; everything else stays at 1 MB.
 app.use(/^\/api\/rider\/jobs\/[^/]+\/(pickup|deliver)$/, express.json({ limit: "3mb" }));

@@ -30,6 +30,15 @@ const siteContentSchema = new Schema(
       title: { type: String, trim: true, maxlength: 120 },
       intro: { type: String, trim: true, maxlength: 1200 },
       sections: { type: [sectionSchema], default: undefined },
+      /** The air cargo rate card or document (image or PDF). */
+      rateCard: { type: Schema.Types.ObjectId, ref: "SiteAsset" },
+      notes: { type: [String], default: undefined },
+    },
+    seaCargo: {
+      title: { type: String, trim: true, maxlength: 120 },
+      intro: { type: String, trim: true, maxlength: 1200 },
+      sections: { type: [sectionSchema], default: undefined },
+      notes: { type: [String], default: undefined },
     },
     express: {
       title: { type: String, trim: true, maxlength: 120 },
