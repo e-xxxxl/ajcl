@@ -1,13 +1,19 @@
 import { z } from "zod";
 import { SHIPMENT_TYPES } from "../../config/shipping";
 import { locationSchema, clientRouteSchema } from "./booking";
+import { toInternationalPhone, phoneProblem } from "../phone";
 
-const phone = z
-  .string()
-  .trim()
-  .min(7, "Enter a valid phone number")
-  .max(30)
-  .regex(/^[+]?[0-9()\s-]{7,30}$/, "Enter a valid phone number");
+const phone = z.string().trim().min(1, "Enter a phone number").max(30, "That phone number is too long");
+
+/** Strict: the customer must give the country code. Stored as +2348031234567, the only form the carrier accepts. */
+function internationalPhone<T extends { phone: string; country: string }>(p: T, ctx: z.RefinementCtx): T {
+  const normalised = toInternationalPhone(p.phone, p.country, { strict: true });
+  if (!normalised) {
+    ctx.addIssue({ code: "custom", path: ["phone"], message: phoneProblem(p.country) });
+    return p;
+  }
+  return { ...p, phone: normalised };
+}
 
 const country = z
   .string()
@@ -25,7 +31,7 @@ export const partySchema = z.object({
   state: z.string().trim().min(2, "Required").max(100),
   country,
   zip: z.string().trim().max(20).optional(),
-});
+}).transform(internationalPhone);
 
 export const itemSchema = z.object({
   description: z.string().trim().min(2, "Describe the item").max(200),

@@ -147,6 +147,9 @@ function mapRate(raw: Obj): TerminalRate | null {
 
 /* ── the real implementation ──────────────────────────────────────────── */
 
+const parcelAlternates = new Map<string, string>();
+export const PARCEL_NOT_FOUND = /parcel.*(not|could not).*found|could not be found/i;
+
 const realApi: TerminalApi = {
   async listCountries() {
     const data = await terminalRequest<unknown>("GET", "/countries");
@@ -232,10 +235,13 @@ const realApi: TerminalApi = {
         })),
       },
     });
-    // Terminal returns both a long `id` and a `PC-` parcel_id and does not say which later calls take.
-    const id = str(data.id) ?? str(data.parcel_id);
-    if (!id) throw new TerminalError("Terminal Africa did not return a parcel id.");
-    return id;
+    // Terminal returns both a long `id` and a `PC-` parcel_id. Shipments are created from the PC- one;
+    // the other is kept as a second try in case a deployment answers differently.
+    const primary = str(data.parcel_id) ?? str(data.id);
+    const other = str(data.id) ?? str(data.parcel_id);
+    if (!primary) throw new TerminalError("Terminal Africa did not return a parcel id.");
+    if (other && other !== primary) parcelAlternates.set(primary, other);
+    return primary;
   },
 
   async createShipment(input) {
@@ -250,7 +256,14 @@ const realApi: TerminalApi = {
           metadata: input.reference ? { reference: input.reference } : undefined,
         },
       });
-    const data = await attempt(input.parcelId);
+    let data: Obj;
+    try {
+      data = await attempt(input.parcelId);
+    } catch (err) {
+      const alt = parcelAlternates.get(input.parcelId);
+      if (!(err instanceof TerminalError) || !alt || !PARCEL_NOT_FOUND.test(err.message)) throw err;
+      data = await attempt(alt);
+    }
     const shipmentId = str(data.shipment_id) ?? str(data.id);
     if (!shipmentId) throw new TerminalError("Terminal Africa did not return a shipment id.");
     return { shipmentId };
@@ -294,12 +307,10 @@ const realApi: TerminalApi = {
   },
 
   async getWalletBalance() {
-    let userId = env.terminal.userId;
-    if (!userId) {
-      // The wallet endpoint wants the Terminal user id; the account's own record has it.
-      const me = await terminalRequest<Obj>("GET", "/users/me");
-      userId = str(me.user_id) ?? str(me.id);
-    }
+    // The wallet endpoint wants the company account's Terminal user id. It is set once in env
+    // (TERMINAL_AFRICA_USER_ID); we never look it up, and never create or check accounts per customer.
+    const userId = env.terminal.userId;
+    if (!userId) throw new TerminalError("Wallet balance is not tracked. Set TERMINAL_AFRICA_USER_ID to show it here.", { retryable: false });
     const data = await terminalRequest<Obj>("GET", "/users/wallet-balance", { query: { user_id: userId } });
     const amount = num(data.amount);
     if (amount === undefined) throw new TerminalError("Terminal Africa did not return a wallet balance.");

@@ -9,6 +9,7 @@ import { validateTiers } from "../lib/services/shipment-pricing";
 import { refreshWallet } from "../lib/services/shipment-terminal";
 import { isTerminalConfigured, env } from "../lib/env";
 import { terminalPing } from "../lib/terminal/client";
+import { toInternationalPhone, phoneProblem } from "../lib/phone";
 import { terminal } from "../lib/terminal/api";
 import { TerminalError } from "../lib/terminal/client";
 import { MAX_AUTO_QUOTE_KG } from "../config/shipping";
@@ -76,7 +77,7 @@ const tierSchema = z.object({
   percent: z.coerce.number().min(0).max(100),
 });
 
-const officeSchema = z.object({
+const officeObject = z.object({
   name: z.string().trim().max(120),
   contactName: z.string().trim().max(120),
   phone: z.string().trim().max(30),
@@ -90,6 +91,17 @@ const officeSchema = z.object({
   lat: z.coerce.number().min(-90).max(90).nullable().optional(),
   lng: z.coerce.number().min(-180).max(180).nullable().optional(),
   openingHours: z.string().trim().max(200),
+});
+
+/** The office phone must be one the carrier accepts (+2348031234567); local Nigerian form is converted. */
+const officeSchema = officeObject.transform((o, ctx) => {
+  if (!o.phone) return o;
+  const phone = toInternationalPhone(o.phone, o.country);
+  if (!phone) {
+    ctx.addIssue({ code: "custom", path: ["phone"], message: phoneProblem(o.country) });
+    return o;
+  }
+  return { ...o, phone };
 });
 
 const settingsSchema = z

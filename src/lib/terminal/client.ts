@@ -100,6 +100,22 @@ export async function terminalRequest<T = unknown>(
   return (json?.data ?? json) as T;
 }
 
+/**
+ * A test key (sk_test_...) only works on the sandbox host and a live key (sk_live_...) only on the live host.
+ * Mixing them gives "Invalid token" or "Account not active", which looks like an account problem but is a setup one.
+ */
+export function keyEnvironmentMismatch(): string | null {
+  const key = env.terminal.secretKey ?? "";
+  const sandboxHost = /sandbox/i.test(env.terminal.url);
+  if (/^sk_live_/i.test(key) && sandboxHost) {
+    return "This is a LIVE key but TERMINAL_AFRICA_URL is the sandbox. Use https://api.terminal.africa for a live key.";
+  }
+  if (/^sk_test_/i.test(key) && !sandboxHost) {
+    return "This is a TEST key but TERMINAL_AFRICA_URL is the live host. Use https://sandbox.terminal.africa for a test key.";
+  }
+  return null;
+}
+
 export type TerminalPing = {
   ok: boolean;
   baseUrl: string;
@@ -113,6 +129,8 @@ export type TerminalPing = {
 export async function terminalPing(): Promise<TerminalPing> {
   const base = { baseUrl: env.terminal.url, keyMasked: maskSecret(env.terminal.secretKey), sandbox: /sandbox/i.test(env.terminal.url) };
   if (!env.terminal.secretKey) return { ...base, ok: false, status: 0, message: "TERMINAL_AFRICA_SECRET_KEY is not set on the server." };
+  const mismatch = keyEnvironmentMismatch();
+  if (mismatch) return { ...base, ok: false, status: 0, message: mismatch };
   try {
     const data = await terminalRequest<unknown[]>("GET", "/countries", { timeoutMs: 15_000 });
     return { ...base, ok: true, status: 200, message: `Connected. ${Array.isArray(data) ? data.length : 0} countries available.` };

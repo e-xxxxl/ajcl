@@ -2,7 +2,8 @@ import { connectToDatabase } from "../db";
 import { Shipment, type ShipmentHydrated } from "../../models/Shipment";
 import { ApiError } from "../api";
 import { isTerminalConfigured } from "../env";
-import { terminal, type TerminalItem, type TerminalShipmentInfo } from "../terminal/api";
+import { toInternationalPhone, phoneProblem } from "../phone";
+import { terminal, PARCEL_NOT_FOUND, type TerminalItem, type TerminalShipmentInfo } from "../terminal/api";
 import { TerminalError } from "../terminal/client";
 import { getShippingSettings, exchangeRatesObject, tiersOf } from "./shipping-settings";
 import { billedWeightKg, computeShippingTotal, manualShippingTotal, needsManualQuote, PricingError } from "./shipment-pricing";
@@ -37,10 +38,17 @@ export function asApiError(err: unknown): never {
   throw err;
 }
 
-function partyForTerminal(p: ShipmentHydrated["receiver"]) {
+/** The phone number in the form Terminal accepts, or a plain-English error that says whose number is wrong. */
+function carrierPhone(raw: string, country: string, whose: string): string {
+  const phone = toInternationalPhone(raw, country);
+  if (!phone) throw new ApiError(`${whose} phone number "${raw}" is not valid for the carrier. ${phoneProblem(country)}.`, 422);
+  return phone;
+}
+
+function partyForTerminal(p: ShipmentHydrated["receiver"], whose: string) {
   return {
     name: p.name,
-    phone: p.phone,
+    phone: carrierPhone(p.phone, p.country, whose),
     email: p.email || undefined,
     line1: p.line1,
     line2: p.line2 || undefined,
@@ -86,7 +94,7 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
     if (!o.zip) throw new ApiError("Add the office postcode in shipping settings first. The carrier needs it to collect parcels.", 422);
     t.pickupAddressId = await api.createAddress({
       name: o.contactName || o.name || "AJCL office",
-      phone: o.phone,
+      phone: carrierPhone(o.phone, o.country || "NG", "The office"),
       email: o.email || undefined,
       line1: o.line1,
       line2: o.line2 || undefined,
@@ -98,7 +106,7 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
     await shipment.save();
   }
   if (!t.deliveryAddressId) {
-    t.deliveryAddressId = await api.createAddress(partyForTerminal(shipment.receiver));
+    t.deliveryAddressId = await api.createAddress(partyForTerminal(shipment.receiver, "The receiver's"));
     await shipment.save();
   }
   if (!t.packagingId) {
@@ -121,13 +129,29 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
     await shipment.save();
   }
   if (!t.shipmentId) {
-    const created = await api.createShipment({
-      fromAddressId: t.pickupAddressId!,
-      toAddressId: t.deliveryAddressId!,
-      parcelId: t.parcelId,
-      purpose: "commercial",
-      reference: shipment.reference,
-    });
+    const make = () =>
+      api.createShipment({
+        fromAddressId: t.pickupAddressId!,
+        toAddressId: t.deliveryAddressId!,
+        parcelId: t.parcelId!,
+        purpose: "commercial",
+        reference: shipment.reference,
+      });
+    let created;
+    try {
+      created = await make();
+    } catch (err) {
+      // A parcel saved with an id the carrier does not accept for shipments: make the parcel again and retry once.
+      if (!(err instanceof TerminalError) || !PARCEL_NOT_FOUND.test(err.message)) throw err;
+      console.warn(`[shipments] ${shipment.reference}: parcel ${t.parcelId} was not found; creating it again`);
+      t.parcelId = await api.createParcel({
+        packagingId: t.packagingId!,
+        items: termItems(shipment),
+        description: shipment.parcel.description.slice(0, 200),
+      });
+      await shipment.save();
+      created = await make();
+    }
     t.shipmentId = created.shipmentId;
     await shipment.save();
   }
@@ -334,6 +358,30 @@ export async function syncTracking(shipment: ShipmentHydrated): Promise<Shipment
 /* ── Booking (this is the step that charges the Terminal wallet) ───────── */
 
 const BOOKABLE: ShipmentStatus[] = ["paid", "booking_failed"];
+
+/** Terminal's wording for an expired rate is not documented, so match on it (client errors only, never money or auth problems). */
+function looksLikeStaleRate(err: unknown): boolean {
+  if (!(err instanceof TerminalError) || err.walletLow || err.retryable) return false;
+  if ([401, 402, 403].includes(err.status)) return false;
+  return /rate|expire|invalid|no longer|not (found|available)/i.test(err.message);
+}
+
+/**
+ * Ask Terminal for the shipment's rates again and take the same carrier's current one. If it now costs more than
+ * what the customer paid for, stop and hand the order to an admin rather than absorbing the difference or booking.
+ */
+async function freshRateFor(terminalId: string, option: { carrierName: string; sourceAmount: number; sourceCurrency: string }) {
+  const fresh = await terminal().getRates({ shipmentId: terminalId, currency: option.sourceCurrency });
+  const same = fresh.find((r) => r.carrierName === option.carrierName);
+  if (!same) throw new ApiError(`${option.carrierName} is not offering this route right now. Send the customer a new quote.`, 409);
+  if (same.amount > option.sourceAmount + 0.005) {
+    throw new ApiError(
+      `Price changed: ${option.carrierName} now charges ${same.amount.toLocaleString("en")} ${option.sourceCurrency} (the customer paid for ${option.sourceAmount.toLocaleString("en")}). Needs your review: send a new quote or refund. It will book by itself if the price comes back down.`,
+      409,
+    );
+  }
+  return same;
+}
 const LOCK_MS = 2 * 60 * 1000;
 
 export async function bookWithTerminal(shipmentId: string, actor: Actor = SYSTEM): Promise<ShipmentHydrated> {
@@ -372,13 +420,18 @@ export async function bookWithTerminal(shipmentId: string, actor: Actor = SYSTEM
 
     // After a carrier cancellation the old rate is dead: ask for rates again and take the same carrier's new one.
     let rateId = option.rateId;
-    if (shipment.terminal.rebookRequired) {
-      const fresh = await terminal().getRates({ shipmentId: terminalId, currency: option.sourceCurrency });
-      const same = fresh.find((r) => r.carrierName === option.carrierName);
-      if (!same) throw new ApiError(`${option.carrierName} is not offering this route right now. Send the customer a new quote.`, 409);
-      rateId = same.rateId;
+    if (shipment.terminal.rebookRequired) rateId = (await freshRateFor(terminalId, option)).rateId;
+
+    let info;
+    try {
+      info = await terminal().bookShipment({ shipmentId: terminalId, rateId });
+    } catch (err) {
+      // The rate we stored may have expired since the customer chose it. Refetch once and try that.
+      if (!looksLikeStaleRate(err)) throw err;
+      console.warn(`[shipments] ${shipment.reference}: rate rejected (${(err as Error).message}); refetching`);
+      rateId = (await freshRateFor(terminalId, option)).rateId;
+      info = await terminal().bookShipment({ shipmentId: terminalId, rateId });
     }
-    const info = await terminal().bookShipment({ shipmentId: terminalId, rateId });
 
     shipment.terminal.shipmentId = info.shipmentId || terminalId;
     shipment.terminal.rateId = rateId;
@@ -514,13 +567,18 @@ export async function estimateRates(input: {
   }
   const o = settings.office;
   if (!o.line1 || !o.phone) throw new ApiError("Quotes are not available right now. Please contact us.", 503);
+  const officePhone = toInternationalPhone(o.phone, o.country || "NG");
+  if (!officePhone) {
+    console.error(`[shipments] the office phone "${o.phone}" is not in international format; fix it in Super Admin > Shipping`);
+    throw new ApiError("Quotes are not available right now. Please contact us.", 503);
+  }
 
   try {
     const api = terminal();
     const [from, to, packaging] = await Promise.all([
       api.createAddress({
         name: o.contactName || o.name || "AJCL office",
-        phone: o.phone,
+        phone: officePhone,
         email: o.email || undefined,
         line1: o.line1,
         city: o.city || "Lagos",
@@ -530,7 +588,7 @@ export async function estimateRates(input: {
       }),
       api.createAddress({
         name: "Quote Request",
-        phone: o.phone,
+        phone: officePhone,
         line1: "To be confirmed",
         city: input.city,
         state: input.state,

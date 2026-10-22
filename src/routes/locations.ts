@@ -19,7 +19,7 @@ locationsRouter.get(
     enforceRateLimit(req, "locations", { limit: 120, windowMs: 60 * 1000 });
     const countries = await getCountries();
     res.setHeader("Cache-Control", "public, max-age=3600");
-    return ok(res, { countries: countries.map((c) => ({ code: c.code, name: c.name })) });
+    return ok(res, { countries: countries.map((c) => ({ code: c.code, name: c.name, phonecode: c.phonecode ?? null })) });
   }),
 );
 
