@@ -62,6 +62,7 @@ const estimateSchema = z.object({
   country: z.string().trim().toUpperCase().length(2),
   state: z.string().trim().min(2).max(100),
   city: z.string().trim().min(2).max(100),
+  zip: z.string().trim().max(20).optional(),
   weightKg: z.coerce.number().min(0.1).max(1000),
   dimensions: z
     .object({
@@ -76,7 +77,7 @@ const estimateSchema = z.object({
 shipmentsRouter.post(
   "/estimate",
   asyncHandler(async (req, res) => {
-    enforceRateLimit(req, "shipment-estimate", { limit: 8, windowMs: 60 * 60 * 1000 });
+    enforceRateLimit(req, "shipment-estimate", { limit: 40, windowMs: 60 * 60 * 1000 });
     const input = parse(estimateSchema, req.body);
     if (input.shipmentType === "interstate" && input.country !== "NG") {
       throw new ApiError("Interstate shipments stay in Nigeria.", 422);

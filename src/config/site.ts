@@ -8,6 +8,6 @@ export const site = {
     phoneHref: "tel:+2348137598694",
     whatsapp: "https://wa.me/2348137598694",
     email: "info@ajcourierlogistics.com",
-    address: "Lagos, Nigeria",
+    address: "120, Iju Road, opp. Addide, Agege, Lagos",
   },
 } as const;

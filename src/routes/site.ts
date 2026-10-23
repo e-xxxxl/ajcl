@@ -55,7 +55,7 @@ siteRouter.get("/air-cargo", asyncHandler(async (_req, res) => ok(res, { page: a
 siteRouter.get("/sea-cargo", asyncHandler(async (_req, res) => ok(res, { page: await getSeaCargo() })));
 
 const enquirySchema = z.object({
-  service: z.enum(["air", "sea"]),
+  service: z.enum(["air", "sea", "express"]),
   fullName: z.string().trim().min(2, "Enter your full name").max(120),
   address: z.string().trim().min(5, "Enter your address").max(300),
   email: z.string().trim().toLowerCase().email("Enter a valid email address").max(200),
@@ -88,10 +88,10 @@ siteRouter.post(
       items: input.items,
     });
 
-    const label = input.service === "air" ? "Air cargo" : "Sea cargo";
+    const label = { air: "air cargo", sea: "sea cargo", express: "AJCL Express" }[input.service];
     const { html, text } = renderEmail({
       preview: `${label} enquiry from ${input.fullName}`,
-      heading: `New ${label.toLowerCase()} enquiry`,
+      heading: `New ${label} enquiry`,
       paragraphs: [
         `Full name: ${input.fullName}`,
         `Address: ${input.address}`,
@@ -104,7 +104,7 @@ siteRouter.post(
     });
     const emailed = await sendEmail({
       to: site.contact.email,
-      subject: `${label} enquiry: ${input.fullName} to ${input.destination}`,
+      subject: `${label[0].toUpperCase()}${label.slice(1)} enquiry: ${input.fullName} to ${input.destination}`,
       html,
       text,
       replyTo: input.email,

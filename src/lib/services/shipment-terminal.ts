@@ -359,6 +359,9 @@ export async function syncTracking(shipment: ShipmentHydrated): Promise<Shipment
 
 const BOOKABLE: ShipmentStatus[] = ["paid", "booking_failed"];
 
+/** Shown to staff on a paid shipment that is waiting for the Terminal wallet to be funded. */
+export const WALLET_WAITING = "Waiting to be booked: the Terminal wallet needs funding.";
+
 /** Terminal's wording for an expired rate is not documented, so match on it (client errors only, never money or auth problems). */
 function looksLikeStaleRate(err: unknown): boolean {
   if (!(err instanceof TerminalError) || err.walletLow || err.retryable) return false;
@@ -462,28 +465,44 @@ export async function bookWithTerminal(shipmentId: string, actor: Actor = SYSTEM
     const message = err instanceof Error ? err.message : "Booking failed";
     console.error(`[shipments] booking ${shipment.reference} failed${walletLow ? " (wallet)" : ""}: ${message}`);
 
-    shipment.terminal.bookingError = walletLow ? "The carrier wallet needs funding." : message.slice(0, 480);
-    if (shipment.status !== "booking_failed") {
-      setStatus(shipment, "booking_failed", SYSTEM, walletLow ? "Carrier wallet balance too low" : "Carrier booking failed");
+    const alreadyWaiting = shipment.terminal.bookingError === WALLET_WAITING;
+    shipment.terminal.bookingError = walletLow ? WALLET_WAITING : message.slice(0, 480);
+    if (walletLow) {
+      // The customer has paid and the shipment sits in Terminal as a draft. An empty wallet is our business, not a
+      // failure for the customer: it stays "paid", shows in the admin list as waiting to be booked, and is booked by
+      // itself (or with "Book now") once the wallet is funded.
+      if (shipment.status === "booking_failed") setStatus(shipment, "paid", SYSTEM, "Waiting for the Terminal wallet to be funded");
+    } else if (shipment.status !== "booking_failed") {
+      setStatus(shipment, "booking_failed", SYSTEM, "Carrier booking failed");
     }
     await shipment.save();
 
-    await notifySuperAdmins(
-      "admin_shipment_booking_failed",
-      walletLow ? "Carrier wallet needs funding" : "Carrier booking failed",
-      walletLow
-        ? `${shipment.reference} is paid but could not be booked. Fund the Terminal wallet, then retry. The customer was not refunded.`
-        : `${shipment.reference} is paid but could not be booked: ${message}`,
-      `/admin/shipments/${shipment.reference}`,
-    );
-    await notifyCustomer(
-      String(shipment.user),
-      "shipment_paid",
-      "Payment received",
-      `Your payment for ${shipment.reference} is safe. We hit a snag booking with the carrier and our team is on it.`,
-      shipment.reference,
-    );
-    if (walletLow) void refreshWallet({ alert: true }).catch(() => undefined);
+    if (walletLow) {
+      // Tell the Super Admin once, not on every retry.
+      if (!alreadyWaiting) {
+        await notifySuperAdmins(
+          "admin_shipment_booking_failed",
+          "Paid shipment waiting for the Terminal wallet",
+          `${shipment.reference} is paid and its draft is in Terminal, but the wallet could not cover the booking. Fund the Terminal wallet: it is booked automatically within a few minutes, or press "Book now" on the shipment. The customer has not been told of any problem.`,
+          `/admin/shipments/${shipment.reference}`,
+        );
+      }
+      void refreshWallet({ alert: true }).catch(() => undefined);
+    } else {
+      await notifySuperAdmins(
+        "admin_shipment_booking_failed",
+        "Carrier booking failed",
+        `${shipment.reference} is paid but could not be booked: ${message}`,
+        `/admin/shipments/${shipment.reference}`,
+      );
+      await notifyCustomer(
+        String(shipment.user),
+        "shipment_paid",
+        "Payment received",
+        `Your payment for ${shipment.reference} is safe. We hit a snag booking with the carrier and our team is on it.`,
+        shipment.reference,
+      );
+    }
   } finally {
     await Shipment.updateOne({ _id: shipment._id }, { $unset: { "terminal.bookingLockAt": 1 } });
   }
@@ -552,6 +571,7 @@ export async function estimateRates(input: {
   country: string;
   state: string;
   city: string;
+  zip?: string;
   weightKg: number;
   dimensions?: { lengthCm: number; widthCm: number; heightCm: number };
 }) {
@@ -589,10 +609,12 @@ export async function estimateRates(input: {
       api.createAddress({
         name: "Quote Request",
         phone: officePhone,
+        email: o.email || undefined,
         line1: "To be confirmed",
         city: input.city,
         state: input.state,
         country: input.country,
+        zip: input.zip || undefined,
       }),
       api.createPackaging({
         name: "Quote box",
@@ -605,7 +627,8 @@ export async function estimateRates(input: {
     const parcelId = await api.createParcel({
       packagingId: packaging,
       description: "Quote request",
-      items: [{ description: "Package", quantity: 1, value: 0, currency: "NGN", weightKg: input.weightKg }],
+      // A small real value: some carriers reject a parcel declared at nothing.
+      items: [{ description: "Package", quantity: 1, value: 1000, currency: "NGN", weightKg: input.weightKg }],
     });
     const { shipmentId } = await api.createShipment({ fromAddressId: from, toAddressId: to, parcelId, purpose: "commercial" });
     const rates = await api.getRates({ shipmentId, currency });
@@ -634,6 +657,11 @@ export async function estimateRates(input: {
       fxUpdatedAt: settings.exchangeRatesUpdatedAt ? new Date(settings.exchangeRatesUpdatedAt).toISOString() : null,
     };
   } catch (err) {
+    // Some destinations cannot be priced without a postcode. Say so, so the customer can add it.
+    if (err instanceof TerminalError && !err.retryable && /zip|post ?code|postal/i.test(err.message)) {
+      console.error(`[shipments] quote needs a postcode: ${err.message}`);
+      throw new ApiError("Please enter the postcode of the destination and try again.", 422);
+    }
     return asApiError(err);
   }
 }
