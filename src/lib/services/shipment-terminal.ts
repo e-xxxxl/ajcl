@@ -649,17 +649,19 @@ export async function estimateRates(input: {
     return { manualRequired: true, billedWeightKg: billedKg, options: [], warnings: [], fxUpdatedAt: null as string | null };
   }
   const fx = exchangeRatesObject(settings);
-  const currency = input.shipmentType === "international" ? settings.internationalQuoteCurrency || "USD" : "NGN";
+  let currency = input.shipmentType === "international" ? settings.internationalQuoteCurrency || "USD" : "NGN";
   if (currency !== "NGN" && !fx[currency]) {
-    throw new ApiError("International quotes are not available right now. Please contact us.", 503);
+    // No exchange rate set for that currency yet: ask Terminal for naira prices instead of refusing the quote.
+    console.warn(`[shipments] no ${currency} exchange rate is set (Super Admin > Shipping); quoting in NGN`);
+    currency = "NGN";
   }
   const o = settings.office;
-  if (!o.line1) throw new ApiError("Quotes are not available right now. Please contact us.", 503);
+  if (!o.line1) console.warn("[shipments] the office address is not set (Super Admin > Shipping); quoting from Lagos");
 
   try {
     // One call to Terminal's quote endpoint. Nothing is created in Terminal for a price check.
     const rates = await terminal().getQuotes({
-      from: { city: o.city || "Lagos", state: o.state || "Lagos", country: o.country || "NG", zip: o.zip || undefined },
+      from: { city: o.city || "Lagos", state: o.state || "Lagos", country: o.country || "NG", zip: o.zip || "100001" },
       to: { city: input.city, state: input.state, country: input.country, zip: input.zip || undefined },
       weightKg: input.weightKg,
       currency,

@@ -312,7 +312,7 @@ const realApi: TerminalApi = {
         },
         currency: input.currency,
       },
-      timeoutMs: 45_000,
+      timeoutMs: 60_000,
     });
     const list = Array.isArray(data) ? data : isObj(data) && Array.isArray(data.rates) ? data.rates : [];
     return list.filter(isObj).map(mapRate).filter((r): r is TerminalRate => r !== null);
