@@ -29,6 +29,7 @@ import {
   fetchAndPriceRates,
   buildManualOption,
   bookWithTerminal,
+  settlePrepaidAfterWeigh,
   syncTracking,
 } from "../lib/services/shipment-terminal";
 import { notifyCustomer } from "../lib/services/shipment-notify";
@@ -132,8 +133,9 @@ officeShipmentsRouter.post(
     const input = parse(confirmWeightSchema, req.body);
     const shipment = await findShipmentByReference(req.params.reference);
     await confirmWeight(shipment, actorOf(session), input);
+    const settled = shipment.prepaid ? await settlePrepaidAfterWeigh(shipment, actorOf(session)) : shipment;
     return ok(res, {
-      shipment: await serializeOne(shipment, { staff: true }),
+      shipment: await serializeOne(settled, { staff: true }),
       manualRequired: requiresManualQuote(shipment),
       maxAutoQuoteKg: MAX_AUTO_QUOTE_KG,
     });

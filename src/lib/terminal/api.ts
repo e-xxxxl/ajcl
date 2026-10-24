@@ -28,6 +28,9 @@ export type TerminalItem = {
   weightKg: number;
 };
 
+/** Just enough of an address to price a route. */
+export type TerminalQuoteAddress = { city: string; state: string; country: string; zip?: string };
+
 export type TerminalRate = {
   rateId: string;
   carrierName: string;
@@ -72,6 +75,8 @@ export interface TerminalApi {
   listWebhooks(): Promise<TerminalWebhook[]>;
   createWebhook(input: { name: string; url: string; events: string[]; live: boolean }): Promise<TerminalWebhook>;
   getRates(input: { shipmentId: string; currency: string }): Promise<TerminalRate[]>;
+  /** Prices a route without creating anything in Terminal. The rates cannot be booked; they are for showing a price. */
+  getQuotes(input: { from: TerminalQuoteAddress; to: TerminalQuoteAddress; weightKg: number; currency: string }): Promise<TerminalRate[]>;
   bookShipment(input: { shipmentId: string; rateId: string }): Promise<TerminalShipmentInfo>;
   track(shipmentId: string): Promise<TerminalShipmentInfo>;
   getWalletBalance(): Promise<{ amount: number; currency: string }>;
@@ -280,6 +285,37 @@ const realApi: TerminalApi = {
       body: { name: input.name, url: input.url, events: input.events, active: true, live: input.live },
     });
     return mapWebhook(data);
+  },
+
+  async getQuotes(input) {
+    const place = (a: TerminalQuoteAddress) => ({ city: a.city, state: a.state, country: a.country, zip: a.zip || "100001" });
+    const data = await terminalRequest<unknown>("POST", "/rates/shipment/quotes", {
+      body: {
+        pickup_address: place(input.from),
+        delivery_address: place(input.to),
+        parcel: {
+          description: "General goods shipment",
+          items: [
+            {
+              name: "Shipment item",
+              description: "General goods shipment",
+              type: "general",
+              currency: input.currency,
+              value: 100,
+              quantity: 1,
+              weight: input.weightKg,
+              weight_unit: "kg",
+            },
+          ],
+          packaging: "",
+          weight_unit: "kg",
+        },
+        currency: input.currency,
+      },
+      timeoutMs: 45_000,
+    });
+    const list = Array.isArray(data) ? data : isObj(data) && Array.isArray(data.rates) ? data.rates : [];
+    return list.filter(isObj).map(mapRate).filter((r): r is TerminalRate => r !== null);
   },
 
   async getRates(input) {

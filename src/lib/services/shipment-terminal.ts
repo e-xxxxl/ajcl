@@ -188,6 +188,74 @@ function priceOption(
   };
 }
 
+/**
+ * International shipments are priced on the customer's own weight as soon as they are created, so they can pay
+ * straight away. If anything is missing (no office postcode, no rates, a heavy parcel) nothing is offered and the
+ * normal flow applies: weigh first, then quote.
+ */
+export async function offerPrepay(shipment: ShipmentHydrated): Promise<void> {
+  if (shipment.shipmentType !== "international") return;
+  try {
+    const { options } = await fetchAndPriceRates(shipment);
+    if (options.length > 0) {
+      shipment.quote.prepayOffered = true;
+      await shipment.save();
+    }
+  } catch (err) {
+    console.warn(`[shipments] ${shipment.reference}: no advance price offered: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+/**
+ * The parcel has just been weighed. For a shipment that was paid for in advance, price the same carrier on the real
+ * weight. Heavier (a higher billed kilogram) means the difference is asked for; the same or lighter is booked as paid.
+ */
+export async function settlePrepaidAfterWeigh(shipment: ShipmentHydrated, actor: Actor): Promise<ShipmentHydrated> {
+  if (!shipment.prepaid || shipment.status !== "weight_confirmed") return shipment;
+  const billedActual = billedWeightKg(weightKg(shipment));
+  if (needsManualQuote(billedActual)) {
+    await notifyOffice("admin_shipment_new", "Prepaid shipment over the weight limit", `${shipment.reference} was paid in advance but weighs over ${MAX_AUTO_QUOTE_KG} kg. Quote the difference by hand.`, shipment.reference);
+    return shipment;
+  }
+  const carrier = shipment.quote.prepaidCarrier;
+  try {
+    const { options } = await fetchAndPriceRates(shipment);
+    const same = options.find((o) => o.carrierName === carrier);
+    if (!same) {
+      await notifyOffice("admin_shipment_new", "Prepaid shipment needs a new quote", `${shipment.reference} was paid in advance with ${carrier}, which no longer offers this weight. Choose another carrier and send a quote.`, shipment.reference);
+      return shipment;
+    }
+    const paid = shipment.shippingAmount ?? 0;
+    const billedEstimate = billedWeightKg(shipment.parcel.estimatedWeightKg);
+    const heavier = billedActual > billedEstimate;
+    const extra = heavier ? Math.round((same.total - paid) * 100) / 100 : 0;
+
+    shipment.quote.options = [same] as never;
+    shipment.quote.selectedRateId = same.rateId;
+    if (extra > 0.5) {
+      shipment.quote.sentAt = new Date();
+      setStatus(shipment, "quote_sent", actor, `Weighed at ${shipment.confirmed?.weightKg} kg (billed ${billedActual} kg, the customer declared ${billedEstimate} kg): additional fee ${extra}`);
+      await shipment.save();
+      await notifyCustomer(
+        String(shipment.user),
+        "shipment_quote_ready",
+        "Additional shipping fee needed",
+        `Your package for ${shipment.reference} weighed ${shipment.confirmed?.weightKg} kg, more than the ${shipment.parcel.estimatedWeightKg} kg you entered. Please pay the additional ${formatNaira(extra)} so we can ship it.`,
+        shipment.reference,
+      );
+      return shipment;
+    }
+    setStatus(shipment, "paid", actor, "Weighed; no additional fee");
+    await shipment.save();
+    await notifyCustomer(String(shipment.user), "shipment_paid", "Your package is weighed", `${shipment.reference} has been weighed. There is nothing more to pay. We are booking it with the carrier now.`, shipment.reference);
+    return await bookWithTerminal(String(shipment._id));
+  } catch (err) {
+    console.error(`[shipments] ${shipment.reference}: could not settle the advance payment: ${err instanceof Error ? err.message : err}`);
+    await notifyOffice("admin_shipment_new", "Prepaid shipment needs attention", `${shipment.reference} was paid in advance and weighed, but the carrier price could not be fetched. Fetch rates and send a quote.`, shipment.reference);
+    return shipment;
+  }
+}
+
 /** Fetch live carrier rates and price each one with the current tiers, fees and exchange rate. */
 export async function fetchAndPriceRates(shipment: ShipmentHydrated): Promise<RateFetchResult> {
   const billedKg = billedWeightKg(weightKg(shipment));
@@ -586,52 +654,16 @@ export async function estimateRates(input: {
     throw new ApiError("International quotes are not available right now. Please contact us.", 503);
   }
   const o = settings.office;
-  if (!o.line1 || !o.phone) throw new ApiError("Quotes are not available right now. Please contact us.", 503);
-  const officePhone = toInternationalPhone(o.phone, o.country || "NG");
-  if (!officePhone) {
-    console.error(`[shipments] the office phone "${o.phone}" is not in international format; fix it in Super Admin > Shipping`);
-    throw new ApiError("Quotes are not available right now. Please contact us.", 503);
-  }
+  if (!o.line1) throw new ApiError("Quotes are not available right now. Please contact us.", 503);
 
   try {
-    const api = terminal();
-    const [from, to, packaging] = await Promise.all([
-      api.createAddress({
-        name: o.contactName || o.name || "AJCL office",
-        phone: officePhone,
-        email: o.email || undefined,
-        line1: o.line1,
-        city: o.city || "Lagos",
-        state: o.state || "Lagos",
-        country: o.country || "NG",
-        zip: o.zip || undefined,
-      }),
-      api.createAddress({
-        name: "Quote Request",
-        phone: officePhone,
-        email: o.email || undefined,
-        line1: "To be confirmed",
-        city: input.city,
-        state: input.state,
-        country: input.country,
-        zip: input.zip || undefined,
-      }),
-      api.createPackaging({
-        name: "Quote box",
-        weightKg: input.weightKg,
-        lengthCm: input.dimensions?.lengthCm,
-        widthCm: input.dimensions?.widthCm,
-        heightCm: input.dimensions?.heightCm,
-      }),
-    ]);
-    const parcelId = await api.createParcel({
-      packagingId: packaging,
-      description: "Quote request",
-      // A small real value: some carriers reject a parcel declared at nothing.
-      items: [{ description: "Package", quantity: 1, value: 1000, currency: "NGN", weightKg: input.weightKg }],
+    // One call to Terminal's quote endpoint. Nothing is created in Terminal for a price check.
+    const rates = await terminal().getQuotes({
+      from: { city: o.city || "Lagos", state: o.state || "Lagos", country: o.country || "NG", zip: o.zip || undefined },
+      to: { city: input.city, state: input.state, country: input.country, zip: input.zip || undefined },
+      weightKg: input.weightKg,
+      currency,
     });
-    const { shipmentId } = await api.createShipment({ fromAddressId: from, toAddressId: to, parcelId, purpose: "commercial" });
-    const rates = await api.getRates({ shipmentId, currency });
 
     const warnings: string[] = [];
     const options = [];

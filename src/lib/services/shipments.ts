@@ -260,6 +260,9 @@ export async function syncShipmentFromPickup(booking: BookingHydrated, to: strin
 
 /* ── Cancelling ────────────────────────────────────────────────────────── */
 
+/** Before the parcel is weighed. International customers may pay for shipping in these. */
+export const PREPAY_STATUSES: ShipmentStatus[] = ["pickup_fee_pending", "awaiting_pickup", "in_transit_to_office", "awaiting_dropoff", "received_at_office"];
+
 const CUSTOMER_CANCELLABLE: ShipmentStatus[] = ["pickup_fee_pending", "awaiting_dropoff", "weight_confirmed", "quote_sent"];
 const ADMIN_CANCELLABLE: ShipmentStatus[] = [
   "pickup_fee_pending",
@@ -282,6 +285,10 @@ export async function cancelShipment(shipment: ShipmentHydrated, actor: Actor, r
         : `A ${shipment.status.replace(/_/g, " ")} shipment cannot be cancelled here.`,
       409,
     );
+  }
+
+  if (actor.role === "customer" && shipment.shippingPaidAt) {
+    throw new ApiError("You have already paid for shipping. Please contact support to cancel and arrange a refund.", 409);
   }
 
   const bookingId = shipment.handover.pickupBooking;
@@ -465,6 +472,8 @@ export type ShipmentDTO = {
     draft?: boolean;
   };
   shippingPayment?: { paid: boolean; amount?: number; paidAt?: string };
+  /** International: paying before the parcel is weighed. */
+  prepay?: { available: boolean; paid: boolean; additionalDue: number };
   terminal: {
     carrierName?: string;
     trackingNumber?: string;
@@ -521,7 +530,16 @@ export function serializeShipment(
   const s = (typeof (doc as ShipmentHydrated).toObject === "function" ? (doc as ShipmentHydrated).toObject() : doc) as ShipmentDoc;
   const staff = Boolean(opts.staff);
   const quoteVisibleToCustomer = ["quote_sent", "paid", "booked", "booking_failed", "in_transit", "delivered"].includes(s.status);
-  const showQuote = staff || quoteVisibleToCustomer;
+  const prepayAvailable =
+    s.shipmentType === "international" &&
+    Boolean(s.quote?.prepayOffered) &&
+    !s.shippingPaidAt &&
+    PREPAY_STATUSES.includes(s.status as ShipmentStatus) &&
+    (s.quote?.options?.length ?? 0) > 0;
+  const selectedOption = (s.quote?.options ?? []).find((o) => o.rateId === s.quote?.selectedRateId);
+  const additionalDue =
+    s.prepaid && s.status === "quote_sent" && selectedOption ? Math.max(0, Math.round((selectedOption.total - (s.shippingAmount ?? 0)) * 100) / 100) : 0;
+  const showQuote = staff || quoteVisibleToCustomer || prepayAvailable;
   const pickup = opts.pickup;
 
   return {
@@ -599,6 +617,7 @@ export function serializeShipment(
       sentAt: iso(s.quote?.sentAt),
       draft: staff ? s.status === "weight_confirmed" && (s.quote?.options?.length ?? 0) > 0 : undefined,
     },
+    prepay: s.shipmentType === "international" ? { available: prepayAvailable, paid: Boolean(s.prepaid), additionalDue } : undefined,
     shippingPayment: s.shippingPaidAt ? { paid: true, amount: s.shippingAmount ?? undefined, paidAt: iso(s.shippingPaidAt) } : { paid: false },
     terminal: {
       carrierName: s.terminal?.carrierName ?? undefined,

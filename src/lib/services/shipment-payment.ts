@@ -7,7 +7,7 @@ import { env } from "../env";
 import { siteUrl } from "../origins";
 import { toMinorUnits } from "../pricing/engine";
 import { initializeTransaction, type PaystackVerifyResult } from "../paystack";
-import { findOwnShipment, setStatus, SYSTEM } from "./shipments";
+import { findOwnShipment, setStatus, SYSTEM, PREPAY_STATUSES } from "./shipments";
 import { bookWithTerminal } from "./shipment-terminal";
 import { notifyCustomer, notifyOffice } from "./shipment-notify";
 import type { ReconcileOutcome } from "./payment";
@@ -26,17 +26,24 @@ export async function initializeShippingPayment(
   await connectToDatabase();
   const shipment = await findOwnShipment(userId, reference);
 
-  if (shipment.status !== "quote_sent") {
+  // Three ways to pay: a normal quote (after weighing), in advance (international, before weighing), or only the
+  // difference after weighing a shipment that was paid in advance.
+  const extraMode = shipment.prepaid && shipment.status === "quote_sent";
+  const advanceMode =
+    !shipment.shippingPaidAt && shipment.quote.prepayOffered && shipment.shipmentType === "international" && PREPAY_STATUSES.includes(shipment.status as never);
+  if (shipment.status !== "quote_sent" && !advanceMode) {
     throw new ApiError(
-      shipment.status === "paid" || shipment.status === "booked"
+      shipment.status === "paid" || shipment.status === "booked" || shipment.shippingPaidAt
         ? "This shipment has already been paid."
         : "There is no quote to pay for this shipment yet.",
       409,
     );
   }
-  const option = shipment.quote.options.find((o) => o.rateId === rateId);
+  const option = shipment.quote.options.find((o) => o.rateId === (extraMode ? shipment.quote.selectedRateId ?? rateId : rateId));
   if (!option) throw new ApiError("That delivery option is no longer available.", 404);
   if (!option.total || option.total <= 0) throw new ApiError("This option has no payable amount.", 422);
+  const payable = extraMode ? Math.round((option.total - (shipment.shippingAmount ?? 0)) * 100) / 100 : option.total;
+  if (payable <= 0) throw new ApiError("Nothing more is due on this shipment.", 409);
   if (!env.paystackSecretKey) throw new ApiError("Payments are not configured. Please contact support.", 503);
 
   const user = await User.findById(userId).lean();
@@ -44,9 +51,10 @@ export async function initializeShippingPayment(
 
   shipment.quote.selectedRateId = option.rateId;
   shipment.quote.selectedAt = new Date();
+  if (advanceMode) shipment.quote.prepaidCarrier = option.carrierName;
   await shipment.save();
 
-  const amount = option.total;
+  const amount = payable;
   const amountMinor = toMinorUnits(amount);
   const txReference = `${shipment.reference}-S-${Date.now().toString(36).toUpperCase()}`;
 
@@ -113,11 +121,39 @@ export async function reconcileShippingPayment(
     return { booking: null, shipment, paid: false, status: ledger.status };
   }
 
+  // Paid in advance (international, before weighing): record it and wait for the parcel. Nothing is booked yet.
+  if (!shipment.shippingPaidAt && shipment.quote.prepayOffered && PREPAY_STATUSES.includes(shipment.status as never)) {
+    const early = await Shipment.findOneAndUpdate(
+      { _id: shipment._id, shippingPaidAt: { $exists: false }, status: { $in: PREPAY_STATUSES } },
+      {
+        $set: { prepaid: true, shippingPaidAt: ledger.paidAt ?? new Date(), shippingAmount: ledger.amount },
+        $push: {
+          statusHistory: { status: shipment.status, note: "Shipping paid in advance on the customer's weight", byRole: "system", byName: SYSTEM.name, at: new Date() },
+        },
+      },
+      { returnDocument: "after" },
+    );
+    if (early) {
+      await notifyCustomer(
+        String(early.user),
+        "shipment_paid",
+        "Shipping payment received",
+        `We received your shipping payment for ${early.reference}. When we weigh your package at our office, if its weight is more than the ${early.parcel.estimatedWeightKg} kg you entered you will be asked to pay the additional fee before it ships.`,
+        early.reference,
+      );
+      await notifyOffice("admin_shipment_new", "Shipment paid in advance", `${early.reference} is paid in advance. Weigh it when it arrives: any difference is priced automatically.`, early.reference);
+      return { booking: null, shipment: early, paid: true, status: early.status };
+    }
+    return { booking: null, shipment: (await Shipment.findById(shipment._id)) ?? shipment, paid: true, status: shipment.status };
+  }
+
   // Claim the paid transition atomically so a webhook racing the callback only books once.
+  const additional = Boolean(shipment.prepaid);
   const moved = await Shipment.findOneAndUpdate(
     { _id: shipment._id, status: "quote_sent" },
     {
-      $set: { status: "paid", shippingPaidAt: ledger.paidAt ?? new Date(), shippingAmount: ledger.amount },
+      $set: additional ? { status: "paid" } : { status: "paid", shippingPaidAt: ledger.paidAt ?? new Date(), shippingAmount: ledger.amount },
+      ...(additional ? { $inc: { shippingAmount: ledger.amount } } : {}),
       $push: {
         statusHistory: { status: "paid", note: "Shipping payment received", byRole: "system", byName: SYSTEM.name, at: new Date() },
       },

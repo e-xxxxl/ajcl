@@ -19,4 +19,5 @@ export { SiteAsset, type SiteAssetDoc } from "./SiteAsset";
 export { PriceList, type PriceListDoc } from "./PriceList";
 export { SiteContent, type SiteContentDoc } from "./SiteContent";
 export { Flyer, type FlyerDoc } from "./Flyer";
+export { Post, type PostDoc } from "./Post";
 export { CargoEnquiry, type CargoEnquiryDoc } from "./CargoEnquiry";

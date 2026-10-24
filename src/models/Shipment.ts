@@ -140,6 +140,10 @@ const shipmentSchema = new Schema(
       /** Options the customer can choose from (a subset of what Terminal returned). */
       options: { type: [quoteOptionSchema], default: [] },
       selectedRateId: { type: String },
+      /** International: prices were fetched on the customer's own weight so they can pay before it is weighed. */
+      prepayOffered: { type: Boolean, default: false },
+      /** The carrier the customer chose when paying in advance; after weighing we price the same one. */
+      prepaidCarrier: { type: String },
       /** Weight the quote was priced on, after rounding up. */
       billedWeightKg: { type: Number },
       sentAt: { type: Date },
@@ -169,6 +173,8 @@ const shipmentSchema = new Schema(
       events: { type: [trackingEventSchema], default: [] },
     },
 
+    /** The customer paid for shipping before the parcel was weighed (international). Any difference is settled after. */
+    prepaid: { type: Boolean, default: false },
     shippingPaidAt: { type: Date },
     shippingAmount: { type: Number, min: 0 },
 

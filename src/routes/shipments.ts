@@ -16,7 +16,7 @@ import {
 } from "../lib/services/shipments";
 import { getShippingSettings } from "../lib/services/shipping-settings";
 import { initializeShippingPayment } from "../lib/services/shipment-payment";
-import { estimateRates, syncTracking } from "../lib/services/shipment-terminal";
+import { estimateRates, syncTracking, offerPrepay } from "../lib/services/shipment-terminal";
 import { resolveLocation } from "../lib/services/locations";
 import { MAX_AUTO_QUOTE_KG } from "../config/shipping";
 
@@ -108,9 +108,10 @@ shipmentsRouter.post(
   "/",
   asyncHandler(async (req, res) => {
     const session = requireSession(req);
-    enforceRateLimit(req, "shipment-create", { limit: 30, windowMs: 10 * 60 * 1000 });
+    enforceRateLimit(req, "shipment-create", { limit: 60, windowMs: 10 * 60 * 1000 });
     const input = parse(createShipmentSchema, req.body);
     const shipment = await createShipmentRequest(session.sub, input);
+    if (shipment.shipmentType === "international") await offerPrepay(shipment);
     return ok(res, { shipment: await serializeOne(shipment) }, 201);
   }),
 );

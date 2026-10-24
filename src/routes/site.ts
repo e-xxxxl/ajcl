@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ok, asyncHandler, parse, ApiError } from "../lib/api";
 import { requireSuperAdmin } from "../lib/auth/middleware";
 import { connectToDatabase } from "../lib/db";
-import { SiteAsset, PriceList, Flyer, CargoEnquiry } from "../models";
+import { SiteAsset, PriceList, Flyer, CargoEnquiry, Post } from "../models";
 import { enforceRateLimit } from "../lib/rate-limit";
 import { sendEmail } from "../lib/email/send";
 import { renderEmail } from "../lib/email/templates";
@@ -51,6 +51,38 @@ siteRouter.get(
 );
 
 siteRouter.get("/air-cargo", asyncHandler(async (_req, res) => ok(res, { page: await getAirCargo() })));
+
+const postCard = (p: { _id: unknown; title: string; slug: string; excerpt?: string | null; coverAsset?: unknown; publishedAt?: Date | null; createdAt?: Date }) => ({
+  id: String(p._id),
+  title: p.title,
+  slug: p.slug,
+  excerpt: p.excerpt ?? "",
+  coverUrl: p.coverAsset ? assetUrl(p.coverAsset) : null,
+  publishedAt: new Date(p.publishedAt ?? p.createdAt ?? Date.now()).toISOString(),
+});
+
+/** GET /api/site/blog: published updates, newest first. */
+siteRouter.get(
+  "/blog",
+  asyncHandler(async (_req, res) => {
+    await connectToDatabase();
+    const posts = await Post.find({ published: true }).sort({ publishedAt: -1, createdAt: -1 }).limit(60).select("-body").lean();
+    res.setHeader("Cache-Control", "no-store");
+    return ok(res, { posts: posts.map(postCard) });
+  }),
+);
+
+/** GET /api/site/blog/:slug */
+siteRouter.get(
+  "/blog/:slug",
+  asyncHandler(async (req, res) => {
+    await connectToDatabase();
+    const p = await Post.findOne({ slug: String(req.params.slug).toLowerCase(), published: true }).lean();
+    if (!p) throw new ApiError("That update could not be found.", 404);
+    res.setHeader("Cache-Control", "no-store");
+    return ok(res, { post: { ...postCard(p), body: p.body, author: p.author ?? null } });
+  }),
+);
 
 siteRouter.get("/sea-cargo", asyncHandler(async (_req, res) => ok(res, { page: await getSeaCargo() })));
 
@@ -493,6 +525,131 @@ siteAdminRouter.delete(
     const flyer = await Flyer.findByIdAndDelete(req.params.id);
     if (!flyer) throw new ApiError("Flyer not found.", 404);
     await SiteAsset.deleteOne({ _id: flyer.asset as unknown as string }).catch(() => undefined);
+    return ok(res, { removed: true });
+  }),
+);
+
+/* ── Blog (Super Admin) ────────────────────────────────────────────────── */
+
+function slugify(title: string): string {
+  const base = title
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return base || "update";
+}
+
+async function uniqueSlug(title: string, ignoreId?: string): Promise<string> {
+  const base = slugify(title);
+  for (let n = 0; n < 50; n++) {
+    const candidate = n === 0 ? base : `${base}-${n + 1}`;
+    const clash = await Post.findOne({ slug: candidate, ...(ignoreId ? { _id: { $ne: ignoreId } } : {}) }).select("_id").lean();
+    if (!clash) return candidate;
+  }
+  return `${base}-${Date.now().toString(36)}`;
+}
+
+const adminPost = (p: { _id: unknown; title: string; slug: string; excerpt?: string | null; body: string; coverAsset?: unknown; published?: boolean | null; publishedAt?: Date | null; createdAt?: Date; updatedAt?: Date }) => ({
+  ...postCard(p),
+  body: p.body,
+  published: Boolean(p.published),
+  updatedAt: new Date(p.updatedAt ?? p.createdAt ?? Date.now()).toISOString(),
+});
+
+const postSchemaIn = z.object({
+  title: z.string().trim().min(3, "Give the update a title").max(160),
+  excerpt: z.string().trim().max(300).optional(),
+  body: z.string().trim().min(10, "Write the update").max(20000),
+  published: z.boolean().optional(),
+  imageFilename: z.string().trim().max(160).optional(),
+  /** A new cover picture, as a data URL. */
+  imageDataUrl: z.string().min(50).optional(),
+  removeImage: z.boolean().optional(),
+});
+
+async function storeCover(userId: string, dataUrl: string, filename?: string) {
+  const { contentType, buffer } = decodeDataUrl(dataUrl, ["image/jpeg", "image/png", "image/webp"], 4_000_000);
+  return SiteAsset.create({ purpose: "blog", filename, contentType, size: buffer.length, data: buffer, storage: "mongo", uploadedBy: userId });
+}
+
+siteAdminRouter.get(
+  "/posts",
+  asyncHandler(async (req, res) => {
+    requireSuperAdmin(req);
+    await connectToDatabase();
+    const posts = await Post.find({}).sort({ createdAt: -1 }).limit(200).lean();
+    return ok(res, { posts: posts.map(adminPost) });
+  }),
+);
+
+siteAdminRouter.post(
+  "/posts",
+  asyncHandler(async (req, res) => {
+    const session = requireSuperAdmin(req);
+    const input = parse(postSchemaIn, req.body);
+    await connectToDatabase();
+    const cover = input.imageDataUrl ? await storeCover(session.sub, input.imageDataUrl, input.imageFilename) : null;
+    const post = await Post.create({
+      title: input.title,
+      slug: await uniqueSlug(input.title),
+      excerpt: input.excerpt ?? "",
+      body: input.body,
+      coverAsset: cover?._id,
+      published: Boolean(input.published),
+      publishedAt: input.published ? new Date() : undefined,
+      author: session.name,
+      createdBy: session.sub,
+    });
+    return ok(res, { post: adminPost(post) }, 201);
+  }),
+);
+
+siteAdminRouter.patch(
+  "/posts/:id",
+  asyncHandler(async (req, res) => {
+    const session = requireSuperAdmin(req);
+    if (!/^[a-f0-9]{24}$/i.test(req.params.id)) throw new ApiError("Update not found.", 404);
+    const input = parse(postSchemaIn.partial(), req.body);
+    await connectToDatabase();
+    const post = await Post.findById(req.params.id);
+    if (!post) throw new ApiError("Update not found.", 404);
+
+    if (input.title !== undefined && input.title !== post.title) {
+      post.title = input.title;
+      post.slug = await uniqueSlug(input.title, String(post._id));
+    }
+    if (input.excerpt !== undefined) post.excerpt = input.excerpt;
+    if (input.body !== undefined) post.body = input.body;
+    if (input.published !== undefined) {
+      if (input.published && !post.published && !post.publishedAt) post.publishedAt = new Date();
+      post.published = input.published;
+    }
+    let oldCover: unknown;
+    if (input.imageDataUrl) {
+      oldCover = post.coverAsset;
+      post.coverAsset = (await storeCover(session.sub, input.imageDataUrl, input.imageFilename))._id as never;
+    } else if (input.removeImage && post.coverAsset) {
+      oldCover = post.coverAsset;
+      post.coverAsset = undefined;
+    }
+    await post.save();
+    if (oldCover) await SiteAsset.deleteOne({ _id: oldCover as string }).catch(() => undefined);
+    return ok(res, { post: adminPost(post) });
+  }),
+);
+
+siteAdminRouter.delete(
+  "/posts/:id",
+  asyncHandler(async (req, res) => {
+    requireSuperAdmin(req);
+    if (!/^[a-f0-9]{24}$/i.test(req.params.id)) throw new ApiError("Update not found.", 404);
+    await connectToDatabase();
+    const post = await Post.findByIdAndDelete(req.params.id);
+    if (!post) throw new ApiError("Update not found.", 404);
+    if (post.coverAsset) await SiteAsset.deleteOne({ _id: post.coverAsset as unknown as string }).catch(() => undefined);
     return ok(res, { removed: true });
   }),
 );
