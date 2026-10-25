@@ -19,6 +19,10 @@ const paymentSchema = new Schema(
     accessCode: { type: String },
     amount: { type: Number, required: true, min: 0 }, // major units (Naira)
     amountMinor: { type: Number, required: true, min: 0 }, // kobo
+    /** When one charge pays the shipping price AND the pickup fee: the whole amount charged, in kobo. */
+    chargedMinor: { type: Number, min: 0 },
+    /** The pickup booking whose fee was paid by this same charge (its own ledger row is "<reference>-P"). */
+    bundledBooking: { type: Schema.Types.ObjectId, ref: "Booking" },
     currency: { type: String, default: "NGN" },
     status: {
       type: String,

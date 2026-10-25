@@ -1,6 +1,7 @@
 import { connectToDatabase } from "../db";
 import { Payment, type PaymentDoc } from "../../models/Payment";
 import { Shipment, type ShipmentHydrated } from "../../models/Shipment";
+import { Booking } from "../../models/Booking";
 import { User } from "../../models/User";
 import { ApiError } from "../api";
 import { env } from "../env";
@@ -10,7 +11,7 @@ import { initializeTransaction, type PaystackVerifyResult } from "../paystack";
 import { findOwnShipment, setStatus, SYSTEM, PREPAY_STATUSES } from "./shipments";
 import { bookWithTerminal } from "./shipment-terminal";
 import { notifyCustomer, notifyOffice } from "./shipment-notify";
-import type { ReconcileOutcome } from "./payment";
+import { priceForBundle, type ReconcileOutcome } from "./payment";
 
 /**
  * The carrier price of a shipment is its own Paystack transaction, separate from the pickup
@@ -22,7 +23,8 @@ export async function initializeShippingPayment(
   userId: string,
   reference: string,
   rateId: string,
-): Promise<{ authorizationUrl: string; reference: string; amount: number }> {
+  includePickupFee = false,
+): Promise<{ authorizationUrl: string; reference: string; amount: number; shippingAmount: number; pickupFee: number }> {
   await connectToDatabase();
   const shipment = await findOwnShipment(userId, reference);
 
@@ -54,13 +56,27 @@ export async function initializeShippingPayment(
   if (advanceMode) shipment.quote.prepaidCarrier = option.carrierName;
   await shipment.save();
 
+  // One charge can pay the pickup fee too (international: pickup fee + only the carrier chosen).
+  let pickup: { amount: number } | null = null;
+  let pickupBooking: InstanceType<typeof Booking> | null = null;
+  if (includePickupFee) {
+    if (!advanceMode || shipment.status !== "pickup_fee_pending" || !shipment.handover.pickupBooking) {
+      throw new ApiError("There is no unpaid pickup fee to include.", 409);
+    }
+    pickupBooking = await Booking.findById(shipment.handover.pickupBooking);
+    if (!pickupBooking) throw new ApiError("The pickup for this shipment could not be found.", 404);
+    pickup = { amount: await priceForBundle(pickupBooking) };
+  }
+
   const amount = payable;
   const amountMinor = toMinorUnits(amount);
+  const charged = amount + (pickup?.amount ?? 0);
+  const chargedMinor = toMinorUnits(charged);
   const txReference = `${shipment.reference}-S-${Date.now().toString(36).toUpperCase()}`;
 
   const init = await initializeTransaction({
     email: user.email,
-    amountMinor,
+    amountMinor: chargedMinor,
     reference: txReference,
     currency: "NGN",
     callbackUrl: `${siteUrl()}/book/payment/callback?ref=${shipment.reference}&kind=shipment`,
@@ -72,6 +88,27 @@ export async function initializeShippingPayment(
     },
   });
 
+  if (pickup && pickupBooking) {
+    // The pickup half keeps its own ledger row and booking summary, settled together with this charge.
+    const pickupReference = `${init.reference}-P`;
+    pickupBooking.payment.provider = "paystack";
+    pickupBooking.payment.status = "pending";
+    pickupBooking.payment.reference = pickupReference;
+    pickupBooking.payment.amount = pickup.amount;
+    await pickupBooking.save();
+    await Payment.create({
+      booking: pickupBooking._id,
+      shipment: shipment._id,
+      purpose: "pickup_fee",
+      user: userId,
+      reference: pickupReference,
+      amount: pickup.amount,
+      amountMinor: toMinorUnits(pickup.amount),
+      currency: "NGN",
+      status: "initialized",
+    });
+  }
+
   await Payment.create({
     shipment: shipment._id,
     purpose: "shipping_total",
@@ -80,11 +117,23 @@ export async function initializeShippingPayment(
     accessCode: init.accessCode,
     amount,
     amountMinor,
+    ...(pickup && pickupBooking ? { chargedMinor, bundledBooking: pickupBooking._id } : {}),
     currency: "NGN",
     status: "initialized",
   });
 
-  return { authorizationUrl: init.authorizationUrl, reference: init.reference, amount };
+  return { authorizationUrl: init.authorizationUrl, reference: init.reference, amount: charged, shippingAmount: amount, pickupFee: pickup?.amount ?? 0 };
+}
+
+/** When this charge also paid the pickup fee, settle that half too. Safe to run again. */
+async function settleBundledPickup(ledger: InstanceType<typeof Payment> & PaymentDoc, verification: PaystackVerifyResult, via: "callback" | "webhook") {
+  if (!ledger.bundledBooking) return;
+  try {
+    const { reconcilePayment } = await import("./payment");
+    await reconcilePayment({ ...verification, reference: `${ledger.reference}-P` }, via);
+  } catch (err) {
+    console.error(`[shipments] the pickup half of ${ledger.reference} could not be settled`, err instanceof Error ? err.message : err);
+  }
 }
 
 /** Apply a Paystack verification to a shipping payment. Idempotent (callback and webhook both call it). */
@@ -98,11 +147,12 @@ export async function reconcileShippingPayment(
   if (!shipment) throw new ApiError("Unknown payment reference.", 404);
 
   if (ledger.status === "success") {
-    return { booking: null, shipment, paid: true, status: "paid" };
+    await settleBundledPickup(ledger, verification, via);
+    return { booking: null, shipment: (await Shipment.findById(shipment._id)) ?? shipment, paid: true, status: "paid" };
   }
 
   // The amount that must have been paid is what was charged when the payment was started.
-  const expectedMinor = ledger.amountMinor;
+  const expectedMinor = ledger.chargedMinor ?? ledger.amountMinor;
   const amountOk = verification.amountMinor >= expectedMinor;
   const success = verification.status === "success" && amountOk;
 
@@ -142,9 +192,12 @@ export async function reconcileShippingPayment(
         early.reference,
       );
       await notifyOffice("admin_shipment_new", "Shipment paid in advance", `${early.reference} is paid in advance. Weigh it when it arrives: any difference is priced automatically.`, early.reference);
-      return { booking: null, shipment: early, paid: true, status: early.status };
+      await settleBundledPickup(ledger, verification, via);
+      return { booking: null, shipment: (await Shipment.findById(early._id)) ?? early, paid: true, status: early.status };
     }
-    return { booking: null, shipment: (await Shipment.findById(shipment._id)) ?? shipment, paid: true, status: shipment.status };
+    await settleBundledPickup(ledger, verification, via);
+    const current = (await Shipment.findById(shipment._id)) ?? shipment;
+    return { booking: null, shipment: current, paid: true, status: current.status };
   }
 
   // Claim the paid transition atomically so a webhook racing the callback only books once.

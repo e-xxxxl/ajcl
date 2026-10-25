@@ -87,8 +87,8 @@ export const createShipmentSchema = z
     ]),
   })
   .superRefine((v, ctx) => {
-    if (v.sender.country !== "NG") {
-      ctx.addIssue({ code: "custom", path: ["sender", "country"], message: "We ship from Nigeria" });
+    if (v.shipmentType === "interstate" && v.sender.country !== "NG") {
+      ctx.addIssue({ code: "custom", path: ["sender", "country"], message: "Interstate shipments stay in Nigeria" });
     }
     if (v.shipmentType === "interstate" && v.receiver.country !== "NG") {
       ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Interstate shipments stay in Nigeria" });
@@ -103,6 +103,8 @@ export const createShipmentSchema = z
       if (v.parcel.items.length === 0) {
         ctx.addIssue({ code: "custom", path: ["parcel", "items"], message: "List what is in the package for customs" });
       }
+      if (!v.sender.email?.trim()) ctx.addIssue({ code: "custom", path: ["sender", "email"], message: "Enter the sender's email" });
+      if (!v.receiver.email?.trim()) ctx.addIssue({ code: "custom", path: ["receiver", "email"], message: "Enter the receiver's email" });
     }
   });
 
@@ -127,7 +129,7 @@ export const staffCreateShipmentSchema = z
     note: z.string().trim().max(300).optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.sender.country !== "NG") ctx.addIssue({ code: "custom", path: ["sender", "country"], message: "We ship from Nigeria" });
+    if (v.shipmentType === "interstate" && v.sender.country !== "NG") ctx.addIssue({ code: "custom", path: ["sender", "country"], message: "Interstate shipments stay in Nigeria" });
     if (v.shipmentType === "interstate" && v.receiver.country !== "NG") {
       ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Interstate shipments stay in Nigeria" });
     }
@@ -171,7 +173,11 @@ export const sendQuoteSchema = z
     message: "Choose at least one option, or enter an amount",
   });
 
-export const payShippingSchema = z.object({ rateId: z.string().trim().min(1, "Choose an option") });
+export const payShippingSchema = z.object({
+  rateId: z.string().trim().min(1, "Choose an option"),
+  /** Pay the rider's pickup fee in the same charge (international, before the pickup fee is paid). */
+  includePickupFee: z.boolean().optional(),
+});
 
 export const markBookedSchema = z.object({
   carrierName: z.string().trim().min(2).max(80),

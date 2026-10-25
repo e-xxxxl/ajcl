@@ -71,6 +71,23 @@ export async function repriceBooking(booking: BookingHydrated): Promise<BookingH
   return booking;
 }
 
+/** The pickup fee of a shipment, re-priced and checked, for a charge that also covers the shipping price. */
+export async function priceForBundle(booking: BookingHydrated): Promise<number> {
+  if (booking.payment?.status === "paid") throw new ApiError("The pickup fee has already been paid.", 409);
+  if (booking.status === "cancelled") throw new ApiError("This pickup was cancelled.", 409);
+  const vehicleDoc = booking.vehicle?.vehicleId ? await Vehicle.findById(booking.vehicle.vehicleId).lean() : null;
+  if (vehicleDoc && booking.vehicle && (await isClassSoldOut(booking.vehicle.slug, vehicleDoc.fleetSize, { excludeBookingId: String(booking._id) }))) {
+    throw new ApiError(
+      `All ${booking.vehicle.name.toLowerCase()}s are currently booked. Please try again shortly, or choose another vehicle.`,
+      409,
+    );
+  }
+  await repriceBooking(booking);
+  const amount = booking.pricing.total;
+  if (!amount || amount <= 0) throw new ApiError("The pickup has no payable amount. Please contact support.", 422);
+  return amount;
+}
+
 /** Start (or resume) checkout for a booking. Returns a Paystack authorization URL. */
 export async function initializeBookingPayment(
   userId: string,
