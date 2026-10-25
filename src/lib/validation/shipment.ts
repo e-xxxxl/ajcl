@@ -108,6 +108,43 @@ export const createShipmentSchema = z
 
 export type CreateShipmentInput = z.infer<typeof createShipmentSchema>;
 
+/** A shipment created by staff on the admin side: the parcel is already in hand, so there is no handover. */
+export const staffCreateShipmentSchema = z
+  .object({
+    shipmentType: z.enum(SHIPMENT_TYPES),
+    /** Put it on this customer's account. Leave empty to keep it on the staff member's own account. */
+    customerEmail: z.string().trim().toLowerCase().email("Enter a valid email").or(z.literal("")).optional(),
+    sender: partySchema,
+    receiver: partySchema,
+    parcel: z.object({
+      description: z.string().trim().min(3, "Describe the package").max(500),
+      /** The real weight, as measured by staff. */
+      estimatedWeightKg: z.coerce.number().min(0.01, "Enter the weight").max(1000),
+      dimensions: dimensionsSchema,
+      declaredValue: z.coerce.number().min(0).max(1_000_000_000).default(0),
+      items: z.array(itemSchema).max(30).default([]),
+    }),
+    note: z.string().trim().max(300).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.sender.country !== "NG") ctx.addIssue({ code: "custom", path: ["sender", "country"], message: "We ship from Nigeria" });
+    if (v.shipmentType === "interstate" && v.receiver.country !== "NG") {
+      ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Interstate shipments stay in Nigeria" });
+    }
+    if (v.shipmentType === "international") {
+      if (v.receiver.country === "NG") ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Choose a country outside Nigeria" });
+      if (!v.receiver.zip?.trim()) ctx.addIssue({ code: "custom", path: ["receiver", "zip"], message: "Enter the postcode. The carrier needs it for international delivery" });
+      if (v.parcel.items.length === 0) ctx.addIssue({ code: "custom", path: ["parcel", "items"], message: "List what is in the package for customs" });
+    }
+  });
+
+export type StaffCreateShipmentInput = z.infer<typeof staffCreateShipmentSchema>;
+
+export const bookWithoutPaymentSchema = z.object({
+  rateId: z.string().trim().min(1, "Choose a delivery option").optional(),
+  note: z.string().trim().min(3, "Say how it was paid, or why it is not charged").max(300),
+});
+
 export const receiveSchema = z.object({ note: z.string().trim().max(500).optional() });
 
 export const confirmWeightSchema = z.object({

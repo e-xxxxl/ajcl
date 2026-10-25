@@ -6,6 +6,7 @@ import { ApiError } from "../api";
 import { createBooking, changeBookingStatus } from "./booking";
 import { getShippingSettings } from "./shipping-settings";
 import { resolveLocation } from "./locations";
+import { publicCarrierName, publicText, publicTrackingUrl, publicHistoryNote } from "../public-text";
 import { billedWeightKg, needsManualQuote } from "./shipment-pricing";
 import { notifyCustomer, notifyOffice } from "./shipment-notify";
 import type { CreateShipmentInput } from "../validation/shipment";
@@ -29,7 +30,7 @@ const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : undefined);
 
 const REF_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
-async function uniqueReference(): Promise<string> {
+export async function uniqueReference(): Promise<string> {
   for (let i = 0; i < 8; i += 1) {
     let code = "";
     for (let j = 0; j < 6; j += 1) code += REF_ALPHABET[Math.floor(Math.random() * REF_ALPHABET.length)];
@@ -472,6 +473,8 @@ export type ShipmentDTO = {
     draft?: boolean;
   };
   shippingPayment?: { paid: boolean; amount?: number; paidAt?: string };
+  /** Staff only: who created it on the admin side, and how it was booked without an online payment. */
+  staff?: { createdBy?: string; offlinePayment?: { note: string; byName?: string; at?: string } };
   /** International: paying before the parcel is weighed. */
   prepay?: { available: boolean; paid: boolean; additionalDue: number };
   terminal: {
@@ -594,7 +597,7 @@ export function serializeShipment(
       options: showQuote
         ? (s.quote?.options ?? []).map((o) => ({
             rateId: o.rateId,
-            carrierName: o.carrierName,
+            carrierName: staff ? o.carrierName : publicCarrierName(o.carrierName),
             carrierLogo: o.carrierLogo ?? undefined,
             service: o.service ?? undefined,
             deliveryTime: o.deliveryTime ?? undefined,
@@ -617,17 +620,25 @@ export function serializeShipment(
       sentAt: iso(s.quote?.sentAt),
       draft: staff ? s.status === "weight_confirmed" && (s.quote?.options?.length ?? 0) > 0 : undefined,
     },
+    staff: staff
+      ? {
+          createdBy: s.createdByStaff?.name ?? undefined,
+          offlinePayment: s.offlinePayment?.note
+            ? { note: s.offlinePayment.note, byName: s.offlinePayment.byName ?? undefined, at: iso(s.offlinePayment.at) }
+            : undefined,
+        }
+      : undefined,
     prepay: s.shipmentType === "international" ? { available: prepayAvailable, paid: Boolean(s.prepaid), additionalDue } : undefined,
     shippingPayment: s.shippingPaidAt ? { paid: true, amount: s.shippingAmount ?? undefined, paidAt: iso(s.shippingPaidAt) } : { paid: false },
     terminal: {
-      carrierName: s.terminal?.carrierName ?? undefined,
+      carrierName: s.terminal?.carrierName ? (staff ? s.terminal.carrierName : publicCarrierName(s.terminal.carrierName)) : undefined,
       trackingNumber: s.terminal?.trackingNumber ?? undefined,
-      trackingUrl: s.terminal?.trackingUrl ?? undefined,
+      trackingUrl: staff ? s.terminal?.trackingUrl ?? undefined : publicTrackingUrl(s.terminal?.trackingUrl),
       status: s.terminal?.status ?? undefined,
       bookedAt: iso(s.terminal?.bookedAt),
       bookingError: staff ? s.terminal?.bookingError ?? undefined : undefined,
       shipmentId: staff ? s.terminal?.shipmentId ?? undefined : undefined,
-      events: (s.terminal?.events ?? []).map((e) => ({ status: e.status, description: e.description ?? undefined, at: iso(e.at) ?? "" })),
+      events: (s.terminal?.events ?? []).map((e) => ({ status: e.status, description: (staff ? e.description : publicText(e.description)) ?? undefined, at: iso(e.at) ?? "" })),
     },
     refund:
       s.refund?.pickupFee?.amount != null || s.refund?.shipping?.amount != null
@@ -639,7 +650,7 @@ export function serializeShipment(
     cancelledReason: s.cancelledReason ?? undefined,
     statusHistory: (s.statusHistory ?? []).map((h) => ({
       status: h.status as ShipmentStatus,
-      note: h.note ?? undefined,
+      note: staff ? h.note ?? undefined : publicHistoryNote(h.note),
       byRole: h.byRole ?? "system",
       byName: staff ? h.byName ?? undefined : undefined,
       at: iso(h.at) ?? "",

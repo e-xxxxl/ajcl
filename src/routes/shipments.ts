@@ -18,6 +18,7 @@ import { getShippingSettings } from "../lib/services/shipping-settings";
 import { initializeShippingPayment } from "../lib/services/shipment-payment";
 import { estimateRates, syncTracking, offerPrepay } from "../lib/services/shipment-terminal";
 import { resolveLocation } from "../lib/services/locations";
+import { publicCarrierName } from "../lib/public-text";
 import { MAX_AUTO_QUOTE_KG } from "../config/shipping";
 
 export const shipmentsRouter = Router();
@@ -63,6 +64,15 @@ const estimateSchema = z.object({
   state: z.string().trim().min(2).max(100),
   city: z.string().trim().min(2).max(100),
   zip: z.string().trim().max(20).optional(),
+  /** Where it ships from. Leave out to use our office. */
+  from: z
+    .object({
+      country: z.string().trim().toUpperCase().length(2),
+      state: z.string().trim().min(2).max(100),
+      city: z.string().trim().min(2).max(100),
+      zip: z.string().trim().max(20).optional(),
+    })
+    .optional(),
   weightKg: z.coerce.number().min(0.1).max(1000),
   dimensions: z
     .object({
@@ -82,19 +92,29 @@ shipmentsRouter.post(
     if (input.shipmentType === "interstate" && input.country !== "NG") {
       throw new ApiError("Interstate shipments stay in Nigeria.", 422);
     }
-    if (input.shipmentType === "international" && input.country === "NG") {
-      throw new ApiError("Choose a country outside Nigeria for an international quote.", 422);
+    if (input.shipmentType === "international" && input.country === (input.from?.country ?? "NG")) {
+      throw new ApiError("Choose a destination in a different country from where it ships.", 422);
+    }
+    if (input.shipmentType === "interstate" && input.from && input.from.country !== "NG") {
+      throw new ApiError("Interstate shipments stay in Nigeria.", 422);
     }
     await connectToDatabase();
     const place = await resolveLocation({ country: input.country, state: input.state, city: input.city }, "destination");
-    const result = await estimateRates({ ...input, country: place.country, state: place.state, city: place.city });
+    const origin = input.from ? await resolveLocation({ country: input.from.country, state: input.from.state, city: input.from.city }, "origin") : null;
+    const result = await estimateRates({
+      ...input,
+      country: place.country,
+      state: place.state,
+      city: place.city,
+      from: origin ? { country: origin.country, state: origin.state, city: origin.city, zip: input.from?.zip } : undefined,
+    });
     return ok(res, {
       manualRequired: result.manualRequired,
       billedWeightKg: result.billedWeightKg,
       fxUpdatedAt: result.fxUpdatedAt,
       options: result.options.map((o) => ({
         rateId: o.rateId,
-        carrierName: o.carrierName,
+        carrierName: publicCarrierName(o.carrierName),
         carrierLogo: o.carrierLogo,
         deliveryTime: o.deliveryTime,
         total: o.total,
@@ -142,7 +162,7 @@ shipmentsRouter.post(
   "/:reference/pay",
   asyncHandler(async (req, res) => {
     const session = requireSession(req);
-    enforceRateLimit(req, "shipment-pay", { limit: 15, windowMs: 10 * 60 * 1000 });
+    enforceRateLimit(req, "shipment-pay", { limit: 30, windowMs: 10 * 60 * 1000 });
     const { rateId } = parse(payShippingSchema, req.body);
     const result = await initializeShippingPayment(session.sub, req.params.reference, rateId);
     return ok(res, { ...result, provider: "paystack" });

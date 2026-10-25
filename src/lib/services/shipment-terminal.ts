@@ -7,7 +7,11 @@ import { terminal, PARCEL_NOT_FOUND, type TerminalItem, type TerminalShipmentInf
 import { TerminalError } from "../terminal/client";
 import { getShippingSettings, exchangeRatesObject, tiersOf } from "./shipping-settings";
 import { billedWeightKg, computeShippingTotal, manualShippingTotal, needsManualQuote, PricingError } from "./shipment-pricing";
-import { setStatus, SYSTEM, type Actor } from "./shipments";
+import { setStatus, SYSTEM, uniqueReference, type Actor } from "./shipments";
+import { resolveLocation } from "./locations";
+import { publicCarrierName } from "../public-text";
+import { User } from "../../models/User";
+import type { StaffCreateShipmentInput } from "../validation/shipment";
 import { notifyCustomer, notifyOffice, notifySuperAdmins } from "./shipment-notify";
 import type { ShipmentStatus } from "../../config/shipping";
 import { MAX_AUTO_QUOTE_KG } from "../../config/shipping";
@@ -186,6 +190,89 @@ function priceOption(
     fxRateUpdatedAt: priced.sourceCurrency === "NGN" ? undefined : ctx.fxUpdatedAt ?? undefined,
     manual: false,
   };
+}
+
+/**
+ * Staff create a shipment on the admin side with no payment. It is saved in Terminal as a draft (addresses, parcel and
+ * shipment) and the carrier rates are fetched, so booking is one click once it is settled offline.
+ */
+export async function createShipmentByStaff(
+  actor: Actor,
+  input: StaffCreateShipmentInput,
+): Promise<{ shipment: ShipmentHydrated; draftWarning?: string }> {
+  await connectToDatabase();
+  let ownerId = actor.id;
+  if (input.customerEmail) {
+    const customer = await User.findOne({ email: input.customerEmail }).select("_id").lean();
+    if (!customer) throw new ApiError("No customer account uses that email. Leave it empty to keep the shipment on your own account.", 422);
+    ownerId = String(customer._id);
+  }
+  if (!ownerId) throw new ApiError("Sign in again to create a shipment.", 401);
+
+  const from = await resolveLocation(input.sender, "sender");
+  const to = await resolveLocation(input.receiver, "receiver");
+  const sender = { ...input.sender, country: from.country, state: from.state, city: from.city };
+  const receiver = { ...input.receiver, country: to.country, state: to.state, city: to.city };
+  const items = input.parcel.items.length
+    ? input.parcel.items
+    : [{ description: input.parcel.description.slice(0, 200), quantity: 1, value: input.parcel.declaredValue, hsCode: undefined }];
+
+  const billed = billedWeightKg(input.parcel.estimatedWeightKg);
+  const now = new Date();
+  const shipment = new Shipment({
+    reference: await uniqueReference(),
+    shipmentType: input.shipmentType,
+    user: ownerId,
+    sender,
+    receiver,
+    parcel: {
+      description: input.parcel.description,
+      estimatedWeightKg: input.parcel.estimatedWeightKg,
+      dimensions: input.parcel.dimensions ?? {},
+      declaredValue: input.parcel.declaredValue,
+      items: items.map((i) => ({ description: i.description, quantity: i.quantity, value: i.value, currency: "NGN", hsCode: i.hsCode || undefined })),
+    },
+    handover: { method: "dropoff", receivedAt: now, receivedBy: actor.id, receivedByName: actor.name },
+    confirmed: { weightKg: input.parcel.estimatedWeightKg, dimensions: input.parcel.dimensions ?? {}, note: input.note, by: actor.id, byName: actor.name, at: now },
+    quote: { billedWeightKg: billed },
+    createdByStaff: { by: actor.id, name: actor.name },
+    status: "weight_confirmed",
+  });
+  shipment.statusHistory.push({
+    status: "weight_confirmed",
+    note: `Created by ${actor.name} on the admin side${input.note ? `: ${input.note}` : ""}`,
+    byRole: actor.role === "office_admin" ? "office_admin" : "admin",
+    byName: actor.name,
+    at: now,
+  });
+  await shipment.save();
+
+  // Save it in Terminal as a draft, then fetch rates so they are ready. Neither blocks the shipment itself.
+  let draftWarning: string | undefined;
+  try {
+    await ensureTerminalDraft(shipment);
+    if (!needsManualQuote(billed)) await fetchAndPriceRates(shipment);
+  } catch (err) {
+    draftWarning = err instanceof Error ? err.message : "The draft could not be saved in Terminal.";
+    console.warn(`[shipments] ${shipment.reference}: staff draft not fully saved in Terminal: ${draftWarning}`);
+  }
+  return { shipment, draftWarning };
+}
+
+/** Book a staff-created shipment with no online payment: paid by transfer or cash, or not charged. Admin only. */
+export async function bookWithoutOnlinePayment(shipment: ShipmentHydrated, actor: Actor, rateId: string | undefined, note: string): Promise<ShipmentHydrated> {
+  if (!shipment.createdByStaff?.name) throw new ApiError("Only a shipment created on the admin side can be booked without an online payment.", 409);
+  if (!["weight_confirmed", "quote_sent"].includes(shipment.status)) throw new ApiError("This shipment cannot be booked this way now.", 409);
+  const options = shipment.quote.options.filter((o) => !o.manual);
+  const chosen = rateId ? options.find((o) => o.rateId === rateId) : options.length === 1 ? options[0] : undefined;
+  if (!chosen) throw new ApiError(options.length === 0 ? "Fetch the carrier rates first." : "Choose a delivery option.", 422);
+
+  shipment.quote.selectedRateId = chosen.rateId;
+  shipment.quote.options = [chosen] as never;
+  shipment.offlinePayment = { note, by: actor.id, byName: actor.name, at: new Date() } as never;
+  setStatus(shipment, "paid", actor, `Booked without an online payment: ${note}`);
+  await shipment.save();
+  return bookWithTerminal(String(shipment._id), actor);
 }
 
 /**
@@ -524,7 +611,7 @@ export async function bookWithTerminal(shipmentId: string, actor: Actor = SYSTEM
       String(shipment.user),
       "shipment_booked",
       "Your shipment is booked",
-      `Shipment ${shipment.reference} is booked with ${shipment.terminal.carrierName}${info.trackingNumber ? `. Tracking number: ${info.trackingNumber}` : ""}.`,
+      `Shipment ${shipment.reference} is booked with ${publicCarrierName(shipment.terminal.carrierName)}${info.trackingNumber ? `. Tracking number: ${info.trackingNumber}` : ""}.`,
       shipment.reference,
     );
     void refreshWallet({ alert: true }).catch(() => undefined);
@@ -640,6 +727,8 @@ export async function estimateRates(input: {
   state: string;
   city: string;
   zip?: string;
+  /** Where it ships from; our office when left out. */
+  from?: { country: string; state: string; city: string; zip?: string };
   weightKg: number;
   dimensions?: { lengthCm: number; widthCm: number; heightCm: number };
 }) {
@@ -661,7 +750,9 @@ export async function estimateRates(input: {
   try {
     // One call to Terminal's quote endpoint. Nothing is created in Terminal for a price check.
     const rates = await terminal().getQuotes({
-      from: { city: o.city || "Lagos", state: o.state || "Lagos", country: o.country || "NG", zip: o.zip || "100001" },
+      from: input.from
+        ? { city: input.from.city, state: input.from.state, country: input.from.country, zip: input.from.zip || undefined }
+        : { city: o.city || "Lagos", state: o.state || "Lagos", country: o.country || "NG", zip: o.zip || "100001" },
       to: { city: input.city, state: input.state, country: input.country, zip: input.zip || undefined },
       weightKg: input.weightKg,
       currency,

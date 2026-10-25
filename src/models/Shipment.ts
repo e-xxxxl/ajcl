@@ -173,6 +173,18 @@ const shipmentSchema = new Schema(
       events: { type: [trackingEventSchema], default: [] },
     },
 
+    /** Set when staff created this shipment on the admin side (walk-in, phone or repeat customer). */
+    createdByStaff: {
+      by: { type: Schema.Types.ObjectId, ref: "User" },
+      name: { type: String, trim: true },
+    },
+    /** Booked by an admin without an online payment (paid by transfer or cash, or not charged). */
+    offlinePayment: {
+      note: { type: String, trim: true, maxlength: 300 },
+      by: { type: Schema.Types.ObjectId, ref: "User" },
+      byName: { type: String, trim: true },
+      at: { type: Date },
+    },
     /** The customer paid for shipping before the parcel was weighed (international). Any difference is settled after. */
     prepaid: { type: Boolean, default: false },
     shippingPaidAt: { type: Date },

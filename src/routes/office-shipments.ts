@@ -12,6 +12,8 @@ import {
   markBookedSchema,
   refundSchema,
   cancelSchema,
+  staffCreateShipmentSchema,
+  bookWithoutPaymentSchema,
 } from "../lib/validation/shipment";
 import {
   findShipmentByReference,
@@ -31,6 +33,8 @@ import {
   bookWithTerminal,
   settlePrepaidAfterWeigh,
   syncTracking,
+  createShipmentByStaff,
+  bookWithoutOnlinePayment,
 } from "../lib/services/shipment-terminal";
 import { notifyCustomer } from "../lib/services/shipment-notify";
 import { SHIPMENT_STATUSES, MAX_AUTO_QUOTE_KG, type ShipmentStatus } from "../config/shipping";
@@ -52,6 +56,29 @@ const listSchema = z.object({
   type: z.enum(["interstate", "international"]).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
 });
+
+/** POST /api/office/shipments: create a shipment on the admin side, with no payment, saved in Terminal as a draft. */
+officeShipmentsRouter.post(
+  "/",
+  asyncHandler(async (req, res) => {
+    const session = requireOffice(req);
+    const input = parse(staffCreateShipmentSchema, req.body);
+    const { shipment, draftWarning } = await createShipmentByStaff(actorOf(session), input);
+    return ok(res, { shipment: await serializeOne(shipment, { staff: true }), draftWarning: draftWarning ?? null }, 201);
+  }),
+);
+
+/** POST /api/office/shipments/:reference/book-without-payment: admins only, because it spends the carrier wallet. */
+officeShipmentsRouter.post(
+  "/:reference/book-without-payment",
+  asyncHandler(async (req, res) => {
+    const session = requireAdmin(req);
+    const { rateId, note } = parse(bookWithoutPaymentSchema, req.body);
+    const shipment = await findShipmentByReference(req.params.reference);
+    const booked = await bookWithoutOnlinePayment(shipment, actorOf(session), rateId, note);
+    return ok(res, { shipment: await serializeOne(booked, { staff: true }) });
+  }),
+);
 
 /** GET /api/office/shipments */
 officeShipmentsRouter.get(
