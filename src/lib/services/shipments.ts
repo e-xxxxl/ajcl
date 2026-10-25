@@ -474,9 +474,9 @@ export type ShipmentDTO = {
   };
   shippingPayment?: { paid: boolean; amount?: number; paidAt?: string };
   /** Staff only: who created it on the admin side, and how it was booked without an online payment. */
-  staff?: { createdBy?: string; offlinePayment?: { note: string; byName?: string; at?: string } };
+  staff?: { createdBy?: string; prepayError?: string; offlinePayment?: { note: string; byName?: string; at?: string } };
   /** International: paying before the parcel is weighed. */
-  prepay?: { available: boolean; paid: boolean; additionalDue: number };
+  prepay?: { available: boolean; paid: boolean; additionalDue: number; unavailable?: boolean };
   terminal: {
     carrierName?: string;
     trackingNumber?: string;
@@ -623,12 +623,22 @@ export function serializeShipment(
     staff: staff
       ? {
           createdBy: s.createdByStaff?.name ?? undefined,
+          prepayError: s.quote?.prepayError ?? undefined,
           offlinePayment: s.offlinePayment?.note
             ? { note: s.offlinePayment.note, byName: s.offlinePayment.byName ?? undefined, at: iso(s.offlinePayment.at) }
             : undefined,
         }
       : undefined,
-    prepay: s.shipmentType === "international" ? { available: prepayAvailable, paid: Boolean(s.prepaid), additionalDue } : undefined,
+    prepay:
+      s.shipmentType === "international"
+        ? {
+            available: prepayAvailable,
+            paid: Boolean(s.prepaid),
+            additionalDue,
+            // Prices could not be loaded yet and the customer can still try again before the parcel is weighed.
+            unavailable: !prepayAvailable && !s.prepaid && !s.shippingPaidAt && PREPAY_STATUSES.includes(s.status as ShipmentStatus),
+          }
+        : undefined,
     shippingPayment: s.shippingPaidAt ? { paid: true, amount: s.shippingAmount ?? undefined, paidAt: iso(s.shippingPaidAt) } : { paid: false },
     terminal: {
       carrierName: s.terminal?.carrierName ? (staff ? s.terminal.carrierName : publicCarrierName(s.terminal.carrierName)) : undefined,

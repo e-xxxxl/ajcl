@@ -15,6 +15,7 @@ import {
   serializeOne,
 } from "../lib/services/shipments";
 import { getShippingSettings } from "../lib/services/shipping-settings";
+import { PREPAY_STATUSES } from "../lib/services/shipments";
 import { initializeShippingPayment } from "../lib/services/shipment-payment";
 import { estimateRates, syncTracking, offerPrepay } from "../lib/services/shipment-terminal";
 import { resolveLocation } from "../lib/services/locations";
@@ -153,6 +154,20 @@ shipmentsRouter.get(
   asyncHandler(async (req, res) => {
     const session = requireSession(req);
     const shipment = await findOwnShipment(session.sub, req.params.reference);
+    return ok(res, { shipment: await serializeOne(shipment) });
+  }),
+);
+
+/** POST /api/shipments/:reference/prepay-retry: load the carrier prices again (international, before it is paid or weighed). */
+shipmentsRouter.post(
+  "/:reference/prepay-retry",
+  asyncHandler(async (req, res) => {
+    const session = requireSession(req);
+    enforceRateLimit(req, "shipment-prepay-retry", { limit: 12, windowMs: 10 * 60 * 1000 });
+    const shipment = await findOwnShipment(session.sub, req.params.reference);
+    if (shipment.shipmentType === "international" && !shipment.shippingPaidAt && PREPAY_STATUSES.includes(shipment.status as never)) {
+      await offerPrepay(shipment);
+    }
     return ok(res, { shipment: await serializeOne(shipment) });
   }),
 );

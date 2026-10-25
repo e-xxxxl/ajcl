@@ -28,10 +28,12 @@ export function asApiError(err: unknown): never {
     // Customers never see the provider's name or its wording. The detail goes to the server log and the Super Admin
     // "Test connection" button.
     console.error("[terminal]", isTerminalConfigured ? `HTTP ${err.status ?? "none"}: ${err.message}` : "not configured");
+    // The plain message is for customers. The original is kept on `cause` for staff-only screens and logs.
+    const plain = (message: string, status: number) => Object.assign(new ApiError(message, status), { cause: err });
     if (!isTerminalConfigured || err.status === 401) {
-      throw new ApiError("Shipping quotes are unavailable right now. Please contact us and we will quote it for you.", 503);
+      throw plain("Shipping quotes are unavailable right now. Please contact us and we will quote it for you.", 503);
     }
-    throw new ApiError(
+    throw plain(
       err.retryable
         ? "Shipping quotes are not responding right now. Please try again in a moment."
         : "We could not get a shipping quote for this parcel. Please check the details or contact us.",
@@ -94,8 +96,8 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
   if (!t.pickupAddressId) {
     const o = settings.office;
     if (!o.line1 || !o.phone) throw new ApiError("Set the office address and phone in shipping settings first.", 422);
-    // Terminal needs a postcode on every address it books a pickup from.
-    if (!o.zip) throw new ApiError("Add the office postcode in shipping settings first. The carrier needs it to collect parcels.", 422);
+    // Terminal wants a postcode on every pickup address. If none is set, use Lagos's general one and say so in the log.
+    if (!o.zip) console.warn("[shipments] the office postcode is not set (Super Admin > Shipping); using 100001");
     t.pickupAddressId = await api.createAddress({
       name: o.contactName || o.name || "AJCL office",
       phone: carrierPhone(o.phone, o.country || "NG", "The office"),
@@ -105,7 +107,7 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
       city: o.city || "Lagos",
       state: o.state || "Lagos",
       country: o.country || "NG",
-      zip: o.zip || undefined,
+      zip: o.zip || "100001",
     });
     await shipment.save();
   }
@@ -280,17 +282,25 @@ export async function bookWithoutOnlinePayment(shipment: ShipmentHydrated, actor
  * straight away. If anything is missing (no office postcode, no rates, a heavy parcel) nothing is offered and the
  * normal flow applies: weigh first, then quote.
  */
-export async function offerPrepay(shipment: ShipmentHydrated): Promise<void> {
-  if (shipment.shipmentType !== "international") return;
+export async function offerPrepay(shipment: ShipmentHydrated): Promise<boolean> {
+  if (shipment.shipmentType !== "international") return false;
   try {
     const { options } = await fetchAndPriceRates(shipment);
     if (options.length > 0) {
       shipment.quote.prepayOffered = true;
+      shipment.quote.prepayError = undefined;
       await shipment.save();
+      return true;
     }
+    shipment.quote.prepayError = "The carrier returned no rates for this route.";
   } catch (err) {
-    console.warn(`[shipments] ${shipment.reference}: no advance price offered: ${err instanceof Error ? err.message : err}`);
+    const cause = (err as { cause?: unknown }).cause;
+    const message = cause instanceof Error ? cause.message : err instanceof Error ? err.message : String(err);
+    console.warn(`[shipments] ${shipment.reference}: no advance price offered: ${message}`);
+    shipment.quote.prepayError = message.slice(0, 300);
   }
+  await shipment.save().catch(() => undefined);
+  return false;
 }
 
 /**
@@ -351,9 +361,11 @@ export async function fetchAndPriceRates(shipment: ShipmentHydrated): Promise<Ra
   }
   const settings = await getShippingSettings();
   const fx = exchangeRatesObject(settings);
-  const currency = shipment.shipmentType === "international" ? settings.internationalQuoteCurrency || "USD" : "NGN";
+  let currency = shipment.shipmentType === "international" ? settings.internationalQuoteCurrency || "USD" : "NGN";
   if (currency !== "NGN" && !fx[currency]) {
-    throw new ApiError(`Set the ${currency} exchange rate in shipping settings before fetching rates.`, 422);
+    // No exchange rate set yet: ask Terminal for naira prices instead of refusing to price the shipment.
+    console.warn(`[shipments] no ${currency} exchange rate is set (Super Admin > Shipping); pricing ${shipment.reference} in NGN`);
+    currency = "NGN";
   }
 
   try {

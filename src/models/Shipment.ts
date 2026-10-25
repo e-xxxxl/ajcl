@@ -142,6 +142,8 @@ const shipmentSchema = new Schema(
       selectedRateId: { type: String },
       /** International: prices were fetched on the customer's own weight so they can pay before it is weighed. */
       prepayOffered: { type: Boolean, default: false },
+      /** Why carrier prices could not be loaded at creation (staff see it; customers get a plain retry). */
+      prepayError: { type: String, trim: true, maxlength: 300 },
       /** The carrier the customer chose when paying in advance; after weighing we price the same one. */
       prepaidCarrier: { type: String },
       /** Weight the quote was priced on, after rounding up. */
