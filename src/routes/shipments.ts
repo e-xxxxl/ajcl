@@ -23,6 +23,7 @@ import { publicCarrierName } from "../lib/public-text";
 import { MAX_AUTO_QUOTE_KG } from "../config/shipping";
 
 export const shipmentsRouter = Router();
+const lastPrepayTry = new Map<string, number>();
 
 /** The office a customer drops parcels at, plus the policy text shown at checkout. Public. */
 export async function publicShippingConfig() {
@@ -93,7 +94,7 @@ shipmentsRouter.post(
     if (input.shipmentType === "interstate" && input.country !== "NG") {
       throw new ApiError("Interstate shipments stay in Nigeria.", 422);
     }
-    if (input.shipmentType === "international" && input.country === (input.from?.country ?? "NG")) {
+    if (input.shipmentType === "international" && input.from && input.country === input.from.country) {
       throw new ApiError("Choose a destination in a different country from where it ships.", 422);
     }
     if (input.shipmentType === "interstate" && input.from && input.from.country !== "NG") {
@@ -154,6 +155,14 @@ shipmentsRouter.get(
   asyncHandler(async (req, res) => {
     const session = requireSession(req);
     const shipment = await findOwnShipment(session.sub, req.params.reference);
+    // An international shipment whose advance prices never loaded gets another try when its page is opened (at most once a minute).
+    if (shipment.shipmentType === "international" && !shipment.quote.prepayOffered && !shipment.shippingPaidAt && PREPAY_STATUSES.includes(shipment.status as never)) {
+      const last = lastPrepayTry.get(shipment.reference) ?? 0;
+      if (Date.now() - last > 60_000) {
+        lastPrepayTry.set(shipment.reference, Date.now());
+        await offerPrepay(shipment);
+      }
+    }
     return ok(res, { shipment: await serializeOne(shipment) });
   }),
 );

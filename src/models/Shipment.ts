@@ -70,6 +70,8 @@ const quoteOptionSchema = new Schema(
     total: { type: Number, required: true, min: 0 },
     /** Entered by hand (over the weight limit, or Terminal unavailable). */
     manual: { type: Boolean, default: false },
+    /** A price shown before the parcel is weighed. It cannot be booked: the real rate is fetched after weighing. */
+    estimated: { type: Boolean, default: false },
   },
   { _id: false },
 );

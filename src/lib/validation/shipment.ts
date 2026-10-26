@@ -94,8 +94,8 @@ export const createShipmentSchema = z
       ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Interstate shipments stay in Nigeria" });
     }
     if (v.shipmentType === "international") {
-      if (v.receiver.country === "NG") {
-        ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Choose a country outside Nigeria" });
+      if (v.receiver.country === v.sender.country) {
+        ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "An international shipment goes to a different country from the sender" });
       }
       if (!v.receiver.zip?.trim()) {
         ctx.addIssue({ code: "custom", path: ["receiver", "zip"], message: "Enter the postcode. The carrier needs it for international delivery" });
@@ -134,7 +134,7 @@ export const staffCreateShipmentSchema = z
       ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Interstate shipments stay in Nigeria" });
     }
     if (v.shipmentType === "international") {
-      if (v.receiver.country === "NG") ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "Choose a country outside Nigeria" });
+      if (v.receiver.country === v.sender.country) ctx.addIssue({ code: "custom", path: ["receiver", "country"], message: "An international shipment goes to a different country from the sender" });
       if (!v.receiver.zip?.trim()) ctx.addIssue({ code: "custom", path: ["receiver", "zip"], message: "Enter the postcode. The carrier needs it for international delivery" });
       if (v.parcel.items.length === 0) ctx.addIssue({ code: "custom", path: ["parcel", "items"], message: "List what is in the package for customs" });
     }

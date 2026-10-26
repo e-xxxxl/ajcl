@@ -285,14 +285,32 @@ export async function bookWithoutOnlinePayment(shipment: ShipmentHydrated, actor
 export async function offerPrepay(shipment: ShipmentHydrated): Promise<boolean> {
   if (shipment.shipmentType !== "international") return false;
   try {
-    const { options } = await fetchAndPriceRates(shipment);
-    if (options.length > 0) {
+    // The same quote the customer picked from in the wizard: one call, nothing saved in Terminal. These prices can be
+    // paid for straight away; the bookable rate is fetched after the parcel is weighed (settlePrepaidAfterWeigh).
+    const d = shipment.parcel.dimensions;
+    const est = await estimateRates({
+      shipmentType: "international",
+      country: shipment.receiver.country,
+      state: shipment.receiver.state,
+      city: shipment.receiver.city,
+      zip: shipment.receiver.zip || undefined,
+      weightKg: shipment.parcel.estimatedWeightKg,
+      dimensions: d?.lengthCm && d?.widthCm && d?.heightCm ? { lengthCm: d.lengthCm, widthCm: d.widthCm, heightCm: d.heightCm } : undefined,
+    });
+    if (!est.manualRequired && est.options.length > 0) {
+      shipment.quote.options = est.options.map((o, i) => ({
+        ...o,
+        rateId: `est-${i}-${o.carrierName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        estimated: true,
+      })) as never;
+      shipment.quote.billedWeightKg = est.billedWeightKg;
+      shipment.quote.selectedRateId = undefined;
       shipment.quote.prepayOffered = true;
       shipment.quote.prepayError = undefined;
       await shipment.save();
       return true;
     }
-    shipment.quote.prepayError = "The carrier returned no rates for this route.";
+    shipment.quote.prepayError = est.manualRequired ? "This parcel is priced by hand." : "The carrier returned no rates for this route.";
   } catch (err) {
     const cause = (err as { cause?: unknown }).cause;
     const message = cause instanceof Error ? cause.message : err instanceof Error ? err.message : String(err);
@@ -584,6 +602,9 @@ export async function bookWithTerminal(shipmentId: string, actor: Actor = SYSTEM
     if (!option) throw new ApiError("No delivery option was selected for this shipment.", 409);
     if (option.manual) {
       throw new ApiError("This shipment was quoted by hand. Book it with the carrier yourself and record the tracking number.", 409);
+    }
+    if (option.estimated) {
+      throw new ApiError("This price was an estimate made before the package was weighed. Weigh the package so the real carrier price can be fetched, then book.", 409);
     }
 
     const terminalId = await ensureTerminalDraft(shipment);
