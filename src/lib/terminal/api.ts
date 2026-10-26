@@ -19,13 +19,18 @@ export type TerminalParty = {
   zip?: string;
 };
 
+/** One line of the parcel. Terminal's parcel item: value is the TOTAL value of the line and weight its weight in kg. */
 export type TerminalItem = {
+  name?: string;
   description: string;
   quantity: number;
-  /** Value of one unit. */
+  /** Total value of the line. */
   value: number;
   currency: string;
+  /** Weight of the line in kg. */
   weightKg: number;
+  /** 4 or 6 digit harmonised system code, when known. */
+  hsCode?: string;
 };
 
 /** Just enough of an address to price a route. */
@@ -69,14 +74,15 @@ export interface TerminalApi {
   listStates(countryCode: string): Promise<TerminalState[]>;
   listCities(countryCode: string, stateCode: string): Promise<TerminalCity[]>;
   createAddress(party: TerminalParty): Promise<string>;
-  createPackaging(input: { weightKg: number; lengthCm?: number; widthCm?: number; heightCm?: number; name: string }): Promise<string>;
+  /** `weightKg` is the weight of the empty packaging; the goods are weighed on the parcel items. */
+  createPackaging(input: { weightKg: number; lengthCm: number; widthCm: number; heightCm: number; name: string }): Promise<string>;
   createParcel(input: { packagingId: string; items: TerminalItem[]; description?: string }): Promise<string>;
   createShipment(input: { fromAddressId: string; toAddressId: string; parcelId: string; purpose: "commercial" | "personal"; reference?: string }): Promise<{ shipmentId: string }>;
   listWebhooks(): Promise<TerminalWebhook[]>;
   createWebhook(input: { name: string; url: string; events: string[]; live: boolean }): Promise<TerminalWebhook>;
   getRates(input: { shipmentId: string; currency: string }): Promise<TerminalRate[]>;
   /** Prices a route without creating anything in Terminal. The rates cannot be booked; they are for showing a price. */
-  getQuotes(input: { from: TerminalQuoteAddress; to: TerminalQuoteAddress; weightKg: number; currency: string }): Promise<TerminalRate[]>;
+  getQuotes(input: { from: TerminalQuoteAddress; to: TerminalQuoteAddress; weightKg: number; currency: string; valueNgn?: number }): Promise<TerminalRate[]>;
   bookShipment(input: { shipmentId: string; rateId: string }): Promise<TerminalShipmentInfo>;
   track(shipmentId: string): Promise<TerminalShipmentInfo>;
   getWalletBalance(): Promise<{ amount: number; currency: string }>;
@@ -210,9 +216,9 @@ const realApi: TerminalApi = {
       body: {
         name: input.name,
         type: "box",
-        length: input.lengthCm ?? 30,
-        width: input.widthCm ?? 30,
-        height: input.heightCm ?? 30,
+        length: input.lengthCm,
+        width: input.widthCm,
+        height: input.heightCm,
         size_unit: "cm",
         weight: input.weightKg,
         weight_unit: "kg",
@@ -230,13 +236,14 @@ const realApi: TerminalApi = {
         weight_unit: "kg",
         description: input.description,
         items: input.items.map((i) => ({
-          name: i.description.slice(0, 60),
+          name: (i.name ?? i.description).slice(0, 60),
           description: i.description,
           type: "parcel",
           currency: i.currency,
           value: i.value,
           quantity: i.quantity,
           weight: i.weightKg,
+          ...(i.hsCode ? { hs_code: i.hsCode } : {}),
         })),
       },
     });
@@ -288,7 +295,13 @@ const realApi: TerminalApi = {
   },
 
   async getQuotes(input) {
-    const place = (a: TerminalQuoteAddress) => ({ city: a.city, state: a.state, country: a.country, zip: a.zip || "100001" });
+    // A postcode is only defaulted for Nigeria (where 100001 is Lagos). A foreign address is sent as given.
+    const place = (a: TerminalQuoteAddress) => ({
+      city: a.city,
+      state: a.state,
+      country: a.country,
+      ...(a.zip ? { zip: a.zip } : a.country.toUpperCase() === "NG" ? { zip: "100001" } : {}),
+    });
     const data = await terminalRequest<unknown>("POST", "/rates/shipment/quotes", {
       body: {
         pickup_address: place(input.from),
@@ -299,9 +312,9 @@ const realApi: TerminalApi = {
             {
               name: "Shipment item",
               description: "General goods shipment",
-              type: "general",
-              currency: input.currency,
-              value: 100,
+              type: "parcel",
+              currency: "NGN",
+              value: input.valueNgn ?? 50000,
               quantity: 1,
               weight: input.weightKg,
               weight_unit: "kg",

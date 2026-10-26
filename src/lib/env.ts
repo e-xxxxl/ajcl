@@ -92,6 +92,8 @@ export const env = {
     /** Signs incoming webhooks. Falls back to the secret key. */
     webhookSecret: get("TERMINAL_AFRICA_WEBHOOK_SECRET") ?? get("TERMINAL_AFRICA_SECRET_KEY"),
     /** The public address of this API, used when registering the webhook. Defaults to the address of the request. */
+    /** TERMINAL_DEBUG=true logs every request body and the raw response, to compare with Terminal's dashboard. */
+    debug: get("TERMINAL_DEBUG")?.toLowerCase() === "true",
     apiPublicUrl: get("API_PUBLIC_URL")?.replace(/\/+$/, ""),
     /** Seconds between tracking polls for shipments webhooks may have missed (0 turns polling off). */
     pollIntervalSeconds: Number(get("TERMINAL_POLL_SECONDS") ?? 900),

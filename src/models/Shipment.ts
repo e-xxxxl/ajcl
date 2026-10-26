@@ -100,6 +100,8 @@ const trackingEventSchema = new Schema(
 const shipmentSchema = new Schema(
   {
     reference: { type: String, required: true, unique: true, index: true },
+    /** International shipments only: "export" (from Nigeria, through our office) or "global" (any country to any country). */
+    flow: { type: String, enum: ["export", "global"] },
     shipmentType: { type: String, enum: SHIPMENT_TYPES as unknown as string[], required: true, index: true },
     user: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
 
@@ -115,7 +117,8 @@ const shipmentSchema = new Schema(
     },
 
     handover: {
-      method: { type: String, enum: ["pickup", "dropoff"], required: true },
+      // pickup / dropoff: the parcel passes through our Lagos office. carrier: a sender outside Nigeria, the carrier collects.
+      method: { type: String, enum: ["pickup", "dropoff", "carrier"], required: true },
       /** The local booking (kind: shipment_pickup) that brings the package to our office. */
       pickupBooking: { type: Schema.Types.ObjectId, ref: "Booking", index: true },
       receivedAt: { type: Date },

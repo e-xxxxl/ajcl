@@ -3,7 +3,7 @@ import { Shipment, type ShipmentHydrated } from "../../models/Shipment";
 import { ApiError } from "../api";
 import { isTerminalConfigured } from "../env";
 import { toInternationalPhone, phoneProblem } from "../phone";
-import { terminal, PARCEL_NOT_FOUND, type TerminalItem, type TerminalShipmentInfo } from "../terminal/api";
+import { terminal, PARCEL_NOT_FOUND, type TerminalItem, type TerminalParty, type TerminalShipmentInfo } from "../terminal/api";
 import { TerminalError } from "../terminal/client";
 import { getShippingSettings, exchangeRatesObject, tiersOf } from "./shipping-settings";
 import { billedWeightKg, computeShippingTotal, manualShippingTotal, needsManualQuote, PricingError } from "./shipment-pricing";
@@ -11,7 +11,7 @@ import { setStatus, SYSTEM, uniqueReference, type Actor } from "./shipments";
 import { resolveLocation } from "./locations";
 import { publicCarrierName } from "../public-text";
 import { User } from "../../models/User";
-import type { StaffCreateShipmentInput } from "../validation/shipment";
+import { flowOf, type StaffCreateShipmentInput } from "../validation/shipment";
 import { notifyCustomer, notifyOffice, notifySuperAdmins } from "./shipment-notify";
 import type { ShipmentStatus } from "../../config/shipping";
 import { MAX_AUTO_QUOTE_KG } from "../../config/shipping";
@@ -51,7 +51,19 @@ function carrierPhone(raw: string, country: string, whose: string): string {
   return phone;
 }
 
-function partyForTerminal(p: ShipmentHydrated["receiver"], whose: string) {
+type PartyLike = {
+  name: string;
+  phone: string;
+  email?: string | null;
+  line1: string;
+  line2?: string | null;
+  city: string;
+  state: string;
+  country: string;
+  zip?: string | null;
+};
+
+function partyForTerminal(p: PartyLike, whose: string): TerminalParty {
   return {
     name: p.name,
     phone: carrierPhone(p.phone, p.country, whose),
@@ -69,19 +81,89 @@ function weightKg(shipment: ShipmentHydrated): number {
   return shipment.confirmed?.weightKg ?? shipment.parcel.estimatedWeightKg;
 }
 
-function termItems(shipment: ShipmentHydrated): TerminalItem[] {
-  const items = shipment.parcel.items.length
-    ? shipment.parcel.items
-    : [{ description: shipment.parcel.description, quantity: 1, value: shipment.parcel.declaredValue ?? 0, currency: "NGN" }];
+/** Terminal adds the packaging's weight to the items'. This is the empty box; the goods are weighed on the items. */
+const PACKAGING_KG = 0.01;
+const DEFAULT_DIM_CM = 30;
+
+export type RouteItem = { description: string; quantity: number; value: number; currency?: string | null; hsCode?: string | null };
+
+/** Terminal wants a 4 or 6 digit HS code. Longer codes are cut to 6; shorter than 4 is left out. */
+function hsFor(code?: string | null): string | undefined {
+  const digits = (code ?? "").replace(/\D/g, "");
+  if (digits.length >= 6) return digits.slice(0, 6);
+  return digits.length >= 4 ? digits.slice(0, 4) : undefined;
+}
+
+/**
+ * The parcel's items as Terminal defines them: `value` is the TOTAL value of the line and `weight` the weight of the
+ * line, and the weights add up to the real weight. (Each line is sent once, with its count in the name, so the weight and
+ * value cannot be counted per unit by one side and per line by the other.)
+ */
+export function buildTermItems(input: { items: RouteItem[]; description: string; declaredValue: number; totalKg: number }): TerminalItem[] {
+  const items: RouteItem[] = input.items.length ? input.items : [{ description: input.description, quantity: 1, value: input.declaredValue, currency: "NGN" }];
   const totalQty = items.reduce((n, i) => n + i.quantity, 0) || 1;
-  const perUnit = Math.max(0.01, Math.round((weightKg(shipment) / totalQty) * 1000) / 1000);
+  const perUnit = input.totalKg / totalQty;
   return items.map((i) => ({
+    name: i.quantity > 1 ? `${i.description} (x${i.quantity})` : i.description,
     description: i.description,
-    quantity: i.quantity,
-    value: i.value,
+    quantity: 1,
+    value: Math.round(i.value * i.quantity * 100) / 100,
     currency: i.currency ?? "NGN",
-    weightKg: perUnit,
+    weightKg: Math.max(0.01, Math.round(perUnit * i.quantity * 1000) / 1000),
+    hsCode: hsFor(i.hsCode),
   }));
+}
+
+function termItems(shipment: ShipmentHydrated): TerminalItem[] {
+  return buildTermItems({
+    items: shipment.parcel.items,
+    description: shipment.parcel.description,
+    declaredValue: shipment.parcel.declaredValue ?? 0,
+    totalKg: weightKg(shipment),
+  });
+}
+
+/** The real size. International rates depend on it, so it is never guessed there. */
+function packageDims(d: { lengthCm?: number | null; widthCm?: number | null; heightCm?: number | null } | null | undefined, international: boolean) {
+  if (d?.lengthCm && d?.widthCm && d?.heightCm) return { lengthCm: d.lengthCm, widthCm: d.widthCm, heightCm: d.heightCm };
+  if (international) throw new ApiError("Enter the package length, width and height. International rates depend on the size.", 422);
+  console.warn(`[shipments] no package size was given; using ${DEFAULT_DIM_CM} x ${DEFAULT_DIM_CM} x ${DEFAULT_DIM_CM} cm`);
+  return { lengthCm: DEFAULT_DIM_CM, widthCm: DEFAULT_DIM_CM, heightCm: DEFAULT_DIM_CM };
+}
+
+/**
+ * Where the carrier collects from. A sender in our office's country hands the parcel to our office (drop-off or our
+ * rider), so the carrier collects from the office. A sender anywhere else is collected from directly. Nothing is
+ * assumed to be Nigerian.
+ */
+function originParty(
+  settings: Awaited<ReturnType<typeof getShippingSettings>>,
+  sender: PartyLike,
+  flow?: "export" | "global" | null,
+): { kind: "office" | "sender"; party: TerminalParty } {
+  const o = settings.office;
+  const officeCountry = (o.country || "NG").toUpperCase();
+  // Export goes through our office. Global is collected from the sender. (Older shipments follow the sender's country.)
+  const viaOffice = flow ? flow === "export" : sender.country.toUpperCase() === officeCountry;
+  if (viaOffice) {
+    if (!o.line1 || !o.phone) throw new ApiError("Set the office address and phone in shipping settings first.", 422);
+    if (!o.zip) console.warn("[shipments] the office postcode is not set (Super Admin > Shipping); using 100001");
+    return {
+      kind: "office",
+      party: {
+        name: o.contactName || o.name || "AJCL office",
+        phone: carrierPhone(o.phone, officeCountry, "The office"),
+        email: o.email || undefined,
+        line1: o.line1,
+        line2: o.line2 || undefined,
+        city: o.city || "Lagos",
+        state: o.state || "Lagos",
+        country: officeCountry,
+        zip: o.zip || "100001",
+      },
+    };
+  }
+  return { kind: "sender", party: partyForTerminal(sender, "The sender's") };
 }
 
 /**
@@ -94,21 +176,7 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
   const api = terminal();
 
   if (!t.pickupAddressId) {
-    const o = settings.office;
-    if (!o.line1 || !o.phone) throw new ApiError("Set the office address and phone in shipping settings first.", 422);
-    // Terminal wants a postcode on every pickup address. If none is set, use Lagos's general one and say so in the log.
-    if (!o.zip) console.warn("[shipments] the office postcode is not set (Super Admin > Shipping); using 100001");
-    t.pickupAddressId = await api.createAddress({
-      name: o.contactName || o.name || "AJCL office",
-      phone: carrierPhone(o.phone, o.country || "NG", "The office"),
-      email: o.email || undefined,
-      line1: o.line1,
-      line2: o.line2 || undefined,
-      city: o.city || "Lagos",
-      state: o.state || "Lagos",
-      country: o.country || "NG",
-      zip: o.zip || "100001",
-    });
+    t.pickupAddressId = await api.createAddress(originParty(settings, shipment.sender, shipment.flow).party);
     await shipment.save();
   }
   if (!t.deliveryAddressId) {
@@ -116,14 +184,18 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
     await shipment.save();
   }
   if (!t.packagingId) {
-    const d = shipment.confirmed?.dimensions ?? shipment.parcel.dimensions;
-    t.packagingId = await api.createPackaging({
-      name: `${shipment.reference} box`,
-      weightKg: weightKg(shipment),
-      lengthCm: d?.lengthCm ?? undefined,
-      widthCm: d?.widthCm ?? undefined,
-      heightCm: d?.heightCm ?? undefined,
-    });
+    // What the office measured wins, field by field; anything it left empty is what the customer entered.
+    const measured = shipment.confirmed?.dimensions;
+    const declared = shipment.parcel.dimensions;
+    const dims = packageDims(
+      {
+        lengthCm: measured?.lengthCm ?? declared?.lengthCm,
+        widthCm: measured?.widthCm ?? declared?.widthCm,
+        heightCm: measured?.heightCm ?? declared?.heightCm,
+      },
+      shipment.shipmentType === "international",
+    );
+    t.packagingId = await api.createPackaging({ name: `${shipment.reference} box`, weightKg: PACKAGING_KG, ...dims });
     await shipment.save();
   }
   if (!t.parcelId) {
@@ -224,6 +296,7 @@ export async function createShipmentByStaff(
   const shipment = new Shipment({
     reference: await uniqueReference(),
     shipmentType: input.shipmentType,
+    flow: flowOf(input.shipmentType, undefined, input.sender.country),
     user: ownerId,
     sender,
     receiver,
@@ -232,7 +305,7 @@ export async function createShipmentByStaff(
       estimatedWeightKg: input.parcel.estimatedWeightKg,
       dimensions: input.parcel.dimensions ?? {},
       declaredValue: input.parcel.declaredValue,
-      items: items.map((i) => ({ description: i.description, quantity: i.quantity, value: i.value, currency: "NGN", hsCode: i.hsCode || undefined })),
+      items: items.map((i) => ({ description: i.description, quantity: i.quantity, value: i.value, currency: ("currency" in i && i.currency) || "NGN", hsCode: i.hsCode || undefined })),
     },
     handover: { method: "dropoff", receivedAt: now, receivedBy: actor.id, receivedByName: actor.name },
     confirmed: { weightKg: input.parcel.estimatedWeightKg, dimensions: input.parcel.dimensions ?? {}, note: input.note, by: actor.id, byName: actor.name, at: now },
@@ -278,6 +351,76 @@ export async function bookWithoutOnlinePayment(shipment: ShipmentHydrated, actor
 }
 
 /**
+ * Carrier prices for a route that has not been saved as a shipment yet. This is Terminal's full rates flow, with the
+ * real details: it creates the pickup address, the delivery address, the packaging (real size), the parcel (real items)
+ * and a shipment, then asks for the rates of that shipment. The origin is the sender's country, never assumed.
+ */
+export async function priceRoute(input: {
+  shipmentType: "interstate" | "international";
+  flow?: "export" | "global" | null;
+  sender: PartyLike;
+  receiver: PartyLike;
+  parcel: { description: string; estimatedWeightKg: number; dimensions?: { lengthCm?: number | null; widthCm?: number | null; heightCm?: number | null } | null; declaredValue: number; items: RouteItem[] };
+}) {
+  const settings = await getShippingSettings();
+  const billedKg = billedWeightKg(input.parcel.estimatedWeightKg);
+  if (needsManualQuote(billedKg)) {
+    return { manualRequired: true, billedWeightKg: billedKg, options: [] as ReturnType<typeof priceOption>[], fxUpdatedAt: null as string | null, origin: "office" as "office" | "sender" };
+  }
+  const fx = exchangeRatesObject(settings);
+  let currency = input.shipmentType === "international" ? settings.internationalQuoteCurrency || "USD" : "NGN";
+  if (currency !== "NGN" && !fx[currency]) {
+    console.warn(`[shipments] no ${currency} exchange rate is set (Super Admin > Shipping); pricing in NGN`);
+    currency = "NGN";
+  }
+  const origin = originParty(settings, input.sender, input.flow);
+  const dims = packageDims(input.parcel.dimensions, input.shipmentType === "international");
+  const destination = partyForTerminal(input.receiver, "The receiver's");
+
+  try {
+    const api = terminal();
+    const [from, to] = await Promise.all([api.createAddress(origin.party), api.createAddress(destination)]);
+    const packagingId = await api.createPackaging({ name: "Rate check", weightKg: PACKAGING_KG, ...dims });
+    const parcelId = await api.createParcel({
+      packagingId,
+      items: buildTermItems({ items: input.parcel.items, description: input.parcel.description, declaredValue: input.parcel.declaredValue, totalKg: input.parcel.estimatedWeightKg }),
+      description: input.parcel.description.slice(0, 200),
+    });
+    const { shipmentId } = await api.createShipment({ fromAddressId: from, toAddressId: to, parcelId, purpose: "commercial" });
+    const rates = await api.getRates({ shipmentId, currency });
+    console.info(
+      `[rates] ${input.flow ?? input.shipmentType} ${origin.party.country} (${origin.kind}) -> ${destination.country} ${input.parcel.estimatedWeightKg} kg (billed ${billedKg}), ${dims.lengthCm}x${dims.widthCm}x${dims.heightCm} cm, asked in ${currency}: ` +
+        (rates.map((r) => `${r.carrierName} ${r.amount} ${r.currency}`).join("; ") || "no rates"),
+    );
+
+    const options: ReturnType<typeof priceOption>[] = [];
+    for (const rate of rates) {
+      if (rate.currency !== "NGN" && !fx[rate.currency]) continue;
+      options.push(priceOption(rate, { fx, fxUpdatedAt: settings.exchangeRatesUpdatedAt, billedKg, tiers: tiersOf(settings), flat: settings.flatFeeNgn, surcharge: settings.surchargeNgn }));
+    }
+    options.sort((a, b) => a.total - b.total);
+    return {
+      manualRequired: false,
+      billedWeightKg: billedKg,
+      options,
+      fxUpdatedAt: settings.exchangeRatesUpdatedAt ? new Date(settings.exchangeRatesUpdatedAt).toISOString() : null,
+      origin: origin.kind,
+    };
+  } catch (err) {
+    return asApiError(err);
+  }
+}
+
+/** A sender outside our office's country has no office stop: price it for real and open it for payment. */
+export async function openCarrierQuote(shipment: ShipmentHydrated): Promise<void> {
+  const { options } = await fetchAndPriceRates(shipment);
+  if (options.length === 0) throw new ApiError("No carrier can take this shipment on that route right now. Please check the addresses or contact us.", 422);
+  shipment.quote.sentAt = new Date();
+  setStatus(shipment, "quote_sent", SYSTEM, "Carrier prices are ready");
+  await shipment.save();
+}
+
+/**
  * International shipments are priced on the customer's own weight as soon as they are created, so they can pay
  * straight away. If anything is missing (no office postcode, no rates, a heavy parcel) nothing is offered and the
  * normal flow applies: weigh first, then quote.
@@ -287,15 +430,18 @@ export async function offerPrepay(shipment: ShipmentHydrated): Promise<boolean> 
   try {
     // The same quote the customer picked from in the wizard: one call, nothing saved in Terminal. These prices can be
     // paid for straight away; the bookable rate is fetched after the parcel is weighed (settlePrepaidAfterWeigh).
-    const d = shipment.parcel.dimensions;
-    const est = await estimateRates({
+    const est = await priceRoute({
       shipmentType: "international",
-      country: shipment.receiver.country,
-      state: shipment.receiver.state,
-      city: shipment.receiver.city,
-      zip: shipment.receiver.zip || undefined,
-      weightKg: shipment.parcel.estimatedWeightKg,
-      dimensions: d?.lengthCm && d?.widthCm && d?.heightCm ? { lengthCm: d.lengthCm, widthCm: d.widthCm, heightCm: d.heightCm } : undefined,
+      flow: shipment.flow,
+      sender: shipment.sender,
+      receiver: shipment.receiver,
+      parcel: {
+        description: shipment.parcel.description,
+        estimatedWeightKg: shipment.parcel.estimatedWeightKg,
+        dimensions: shipment.parcel.dimensions,
+        declaredValue: shipment.parcel.declaredValue ?? 0,
+        items: shipment.parcel.items,
+      },
     });
     if (!est.manualRequired && est.options.length > 0) {
       shipment.quote.options = est.options.map((o, i) => ({

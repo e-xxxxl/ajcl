@@ -91,6 +91,10 @@ export async function terminalRequest<T = unknown>(
   }
 
   console.info(`[terminal] ${method} ${path} -> ${res.status} (${Date.now() - started}ms)`);
+  if (env.terminal.debug) {
+    // The secret key is a header and is never logged. Bodies hold the addresses and parcel exactly as Terminal received them.
+    console.info(`[terminal:debug] ${method} ${url.pathname}${url.search}\n  request: ${opts.body === undefined ? "(none)" : JSON.stringify(opts.body)}\n  response: ${text.slice(0, 30000)}`);
+  }
 
   if (!res.ok || (json && json.status === false)) {
     const message = (json && typeof json.message === "string" && json.message) || `Terminal Africa returned ${res.status}.`;

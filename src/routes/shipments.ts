@@ -6,7 +6,7 @@ import { enforceRateLimit } from "../lib/rate-limit";
 import { connectToDatabase } from "../lib/db";
 import { Shipment } from "../models/Shipment";
 import { env } from "../lib/env";
-import { createShipmentSchema, payShippingSchema, cancelSchema } from "../lib/validation/shipment";
+import { createShipmentSchema, ratesRequestSchema, payShippingSchema, cancelSchema, flowOf } from "../lib/validation/shipment";
 import {
   createShipmentRequest,
   findOwnShipment,
@@ -15,9 +15,9 @@ import {
   serializeOne,
 } from "../lib/services/shipments";
 import { getShippingSettings } from "../lib/services/shipping-settings";
-import { PREPAY_STATUSES } from "../lib/services/shipments";
+import { PREPAY_STATUSES, setStatus, SYSTEM } from "../lib/services/shipments";
 import { initializeShippingPayment } from "../lib/services/shipment-payment";
-import { estimateRates, syncTracking, offerPrepay } from "../lib/services/shipment-terminal";
+import { estimateRates, syncTracking, offerPrepay, priceRoute, openCarrierQuote } from "../lib/services/shipment-terminal";
 import { resolveLocation } from "../lib/services/locations";
 import { publicCarrierName } from "../lib/public-text";
 import { MAX_AUTO_QUOTE_KG } from "../config/shipping";
@@ -39,6 +39,7 @@ export async function publicShippingConfig() {
       city: o.city,
       state: o.state,
       zip: o.zip,
+      country: o.country,
       lat: o.lat ?? null,
       lng: o.lng ?? null,
       openingHours: o.openingHours,
@@ -125,6 +126,39 @@ shipmentsRouter.post(
   }),
 );
 
+/** POST /api/shipments/rates: carrier prices for a route, using the real addresses, size and items. Nothing is saved as a shipment. */
+shipmentsRouter.post(
+  "/rates",
+  asyncHandler(async (req, res) => {
+    const session = requireSession(req);
+    enforceRateLimit(req, `shipment-rates:${session.sub}`, { limit: 30, windowMs: 60 * 60 * 1000 });
+    const input = parse(ratesRequestSchema, req.body);
+    await connectToDatabase();
+    const from = await resolveLocation(input.sender, "sender");
+    const to = await resolveLocation(input.receiver, "receiver");
+    const result = await priceRoute({
+      shipmentType: input.shipmentType,
+      flow: flowOf(input.shipmentType, input.flow, from.country),
+      sender: { ...input.sender, country: from.country, state: from.state, city: from.city },
+      receiver: { ...input.receiver, country: to.country, state: to.state, city: to.city },
+      parcel: input.parcel,
+    });
+    return ok(res, {
+      manualRequired: result.manualRequired,
+      billedWeightKg: result.billedWeightKg,
+      fxUpdatedAt: result.fxUpdatedAt,
+      collectedFrom: result.origin,
+      options: result.options.map((o) => ({
+        rateId: o.rateId,
+        carrierName: publicCarrierName(o.carrierName),
+        carrierLogo: o.carrierLogo,
+        deliveryTime: o.deliveryTime,
+        total: o.total,
+      })),
+    });
+  }),
+);
+
 /** POST /api/shipments: create a shipment (and, for pickup, its rider booking). */
 shipmentsRouter.post(
   "/",
@@ -133,7 +167,18 @@ shipmentsRouter.post(
     enforceRateLimit(req, "shipment-create", { limit: 60, windowMs: 10 * 60 * 1000 });
     const input = parse(createShipmentSchema, req.body);
     const shipment = await createShipmentRequest(session.sub, input);
-    if (shipment.shipmentType === "international") await offerPrepay(shipment);
+    if (shipment.handover.method === "carrier") {
+      // No office stop: the carrier prices it for real and it opens for payment. If it cannot be priced, it is not kept.
+      try {
+        await openCarrierQuote(shipment);
+      } catch (err) {
+        setStatus(shipment, "cancelled", SYSTEM, "Could not be priced");
+        await shipment.save().catch(() => undefined);
+        throw err;
+      }
+    } else if (shipment.shipmentType === "international") {
+      await offerPrepay(shipment);
+    }
     return ok(res, { shipment: await serializeOne(shipment) }, 201);
   }),
 );

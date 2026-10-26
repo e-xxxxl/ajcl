@@ -121,6 +121,22 @@ export const SHIPMENT_FLOW_DROPOFF: ShipmentStatus[] = [
   "delivered",
 ];
 
+/** A sender outside Nigeria: nothing passes through our office, the carrier collects from the sender. */
+export const SHIPMENT_FLOW_CARRIER: ShipmentStatus[] = ["quote_sent", "paid", "booked", "in_transit", "delivered"];
+
+/**
+ * The two kinds of international shipment.
+ *  export: from Nigeria to any country. The parcel goes through our Lagos office (drop-off or our rider).
+ *  global: between any two countries. No office stop: the carrier collects from the sender and delivers to the receiver.
+ */
+export const SHIPMENT_FLOWS = ["export", "global"] as const;
+export type ShipmentFlow = (typeof SHIPMENT_FLOWS)[number];
+export const EXPORT_COUNTRY = "NG";
+export const SHIPMENT_FLOW_LABEL: Record<ShipmentFlow, string> = { export: "Export from Nigeria", global: "Global" };
+
+/** The currencies Terminal accepts on a parcel item and for rates. */
+export const ITEM_CURRENCIES = ["NGN", "USD", "GBP", "EUR", "CAD", "AUD", "AED", "CNY", "GHS", "HKD", "KES", "TZS", "UGX", "ZAR"] as const;
+
 /** Over this weight (after rounding up) the Office Admin must enter a quote by hand. */
 export const MAX_AUTO_QUOTE_KG = 70;
 

@@ -9,7 +9,7 @@ import { resolveLocation } from "./locations";
 import { publicCarrierName, publicText, publicTrackingUrl, publicHistoryNote } from "../public-text";
 import { billedWeightKg, needsManualQuote } from "./shipment-pricing";
 import { notifyCustomer, notifyOffice } from "./shipment-notify";
-import type { CreateShipmentInput } from "../validation/shipment";
+import { flowOf, type CreateShipmentInput } from "../validation/shipment";
 import type { ShipmentStatus } from "../../config/shipping";
 
 /**
@@ -92,6 +92,20 @@ export async function createShipmentRequest(userId: string, input: CreateShipmen
     receiver: { ...input.receiver, country: to.country, state: to.state, city: to.city },
   };
 
+  // Where the parcel goes first depends on where the sender is: our office's country brings it to the office, any other
+  // country is collected by the carrier from the sender.
+  const flow = flowOf(input.shipmentType, input.flow, input.sender.country);
+  if (flow === "global") {
+    if (input.handover.method !== "carrier") {
+      throw new ApiError("In a global shipment the carrier collects the package from the sender's address. There is no pickup or drop-off.", 422);
+    }
+    if (!input.sender.zip?.trim()) {
+      throw new ApiError("Enter the sender's postcode. The carrier needs it to collect the package.", 422);
+    }
+  } else if (input.handover.method === "carrier") {
+    throw new ApiError("Choose a pickup by our rider or a drop-off at our office.", 422);
+  }
+
   const items = input.parcel.items.length
     ? input.parcel.items
     : [
@@ -107,6 +121,7 @@ export async function createShipmentRequest(userId: string, input: CreateShipmen
   const shipment = new Shipment({
     reference,
     shipmentType: input.shipmentType,
+    flow,
     user: userId,
     sender: input.sender,
     receiver: input.receiver,
@@ -119,12 +134,12 @@ export async function createShipmentRequest(userId: string, input: CreateShipmen
         description: i.description,
         quantity: i.quantity,
         value: i.value,
-        currency: "NGN",
+        currency: ("currency" in i && i.currency) || "NGN",
         hsCode: i.hsCode || undefined,
       })),
     },
     handover: { method: input.handover.method },
-    status: input.handover.method === "pickup" ? "pickup_fee_pending" : "awaiting_dropoff",
+    status: input.handover.method === "pickup" ? "pickup_fee_pending" : input.handover.method === "carrier" ? "weight_confirmed" : "awaiting_dropoff",
   });
   shipment.statusHistory.push({
     status: shipment.status,
@@ -196,7 +211,9 @@ export async function createShipmentRequest(userId: string, input: CreateShipmen
     "Shipment created",
     input.handover.method === "pickup"
       ? `Shipment ${reference} is created. Pay the pickup fee so a rider can collect your package.`
-      : `Shipment ${reference} is created. Bring your package to our office and quote this reference.`,
+      : input.handover.method === "carrier"
+        ? `Shipment ${reference} is created. Choose a carrier and pay, and the carrier will collect the package from your address.`
+        : `Shipment ${reference} is created. Bring your package to our office and quote this reference.`,
     reference,
   );
   if (input.handover.method === "dropoff") {
@@ -441,6 +458,8 @@ export type ShipmentDTO = {
   id: string;
   reference: string;
   shipmentType: "interstate" | "international";
+  /** International only: "export" (from Nigeria, via our office) or "global" (any country to any country). */
+  flow?: "export" | "global";
   status: ShipmentStatus;
   createdAt?: string;
   updatedAt?: string;
@@ -455,7 +474,7 @@ export type ShipmentDTO = {
     items: { description: string; quantity: number; value: number; currency: string; hsCode?: string }[];
   };
   handover: {
-    method: "pickup" | "dropoff";
+    method: "pickup" | "dropoff" | "carrier";
     pickupBookingReference?: string;
     pickupFee?: { amount: number; paid: boolean; status: string; bookingStatus: string };
     receivedAt?: string;
@@ -549,6 +568,7 @@ export function serializeShipment(
     id: String(s._id),
     reference: s.reference,
     shipmentType: s.shipmentType as ShipmentDTO["shipmentType"],
+    flow: (s.flow as ShipmentDTO["flow"]) ?? undefined,
     status: s.status as ShipmentStatus,
     createdAt: iso((s as { createdAt?: Date }).createdAt),
     updatedAt: iso((s as { updatedAt?: Date }).updatedAt),
