@@ -33,6 +33,12 @@ export const partySchema = z.object({
   zip: z.string().trim().max(20).optional(),
 }).transform(internationalPhone);
 
+/** Correct one phone number on an existing shipment. */
+export const contactSchema = z.object({
+  who: z.enum(["sender", "receiver"]),
+  phone: z.string().trim().min(1, "Enter the phone number").max(30),
+});
+
 export const itemSchema = z.object({
   description: z.string().trim().min(2, "Describe the item").max(200),
   quantity: z.coerce.number().int().min(1).max(9999),

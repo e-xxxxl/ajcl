@@ -149,6 +149,8 @@ const shipmentSchema = new Schema(
       prepayOffered: { type: Boolean, default: false },
       /** Why carrier prices could not be loaded at creation (staff see it; customers get a plain retry). */
       prepayError: { type: String, trim: true, maxlength: 300 },
+      /** The carrier refused a detail of an address (a phone number, state, postcode). Plain words, shown to the customer so they can fix it. */
+      addressProblem: { type: String, trim: true, maxlength: 400 },
       /** The carrier the customer chose when paying in advance; after weighing we price the same one. */
       prepaidCarrier: { type: String },
       /** Weight the quote was priced on, after rounding up. */

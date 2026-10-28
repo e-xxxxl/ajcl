@@ -40,6 +40,9 @@ export async function uniqueReference(): Promise<string> {
   return `AJX-${Date.now().toString(36).toUpperCase().slice(-8)}`;
 }
 
+/** Once the carrier has the shipment, a phone number can no longer be changed here. */
+export const CONTACT_LOCKED: ShipmentStatus[] = ["booked", "in_transit", "delivered", "cancelled", "failed"];
+
 /** Record a status change in the shipment's history. Does not save. */
 export function setStatus(shipment: ShipmentHydrated, status: ShipmentStatus, actor: Actor, note?: string) {
   shipment.status = status;
@@ -496,6 +499,10 @@ export type ShipmentDTO = {
   staff?: { createdBy?: string; prepayError?: string; offlinePayment?: { note: string; byName?: string; at?: string } };
   /** International: paying before the parcel is weighed. */
   prepay?: { available: boolean; paid: boolean; additionalDue: number; unavailable?: boolean };
+  /** A detail of the sender's or receiver's address the carrier refused, in plain words. The customer can correct it. */
+  addressProblem?: string;
+  /** Whether the phone numbers can still be corrected (until the carrier has the shipment). */
+  contactEditable?: boolean;
   terminal: {
     carrierName?: string;
     trackingNumber?: string;
@@ -640,6 +647,8 @@ export function serializeShipment(
       sentAt: iso(s.quote?.sentAt),
       draft: staff ? s.status === "weight_confirmed" && (s.quote?.options?.length ?? 0) > 0 : undefined,
     },
+    addressProblem: s.quote?.addressProblem || undefined,
+    contactEditable: !CONTACT_LOCKED.includes(s.status as ShipmentStatus),
     staff: staff
       ? {
           createdBy: s.createdByStaff?.name ?? undefined,

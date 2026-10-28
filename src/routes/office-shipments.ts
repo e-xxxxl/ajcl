@@ -14,6 +14,7 @@ import {
   cancelSchema,
   staffCreateShipmentSchema,
   bookWithoutPaymentSchema,
+  contactSchema,
 } from "../lib/validation/shipment";
 import {
   findShipmentByReference,
@@ -35,6 +36,7 @@ import {
   syncTracking,
   createShipmentByStaff,
   bookWithoutOnlinePayment,
+  correctContactPhone,
 } from "../lib/services/shipment-terminal";
 import { notifyCustomer } from "../lib/services/shipment-notify";
 import { SHIPMENT_STATUSES, MAX_AUTO_QUOTE_KG, type ShipmentStatus } from "../config/shipping";
@@ -305,6 +307,18 @@ officeShipmentsRouter.post(
     const shipment = await findShipmentByReference(req.params.reference);
     if (!isTerminalConfigured) throw new ApiError("Terminal Africa is not configured.", 503);
     await syncTracking(shipment);
+    return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
+  }),
+);
+
+/** POST /api/office/shipments/:reference/contact: correct a phone number for the customer, before the carrier has the shipment. */
+officeShipmentsRouter.post(
+  "/:reference/contact",
+  asyncHandler(async (req, res) => {
+    const session = requireOffice(req);
+    const { who, phone } = parse(contactSchema, req.body);
+    const shipment = await findShipmentByReference(req.params.reference);
+    await correctContactPhone(shipment, who, phone, actorOf(session));
     return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
   }),
 );

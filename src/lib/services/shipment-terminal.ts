@@ -7,8 +7,8 @@ import { terminal, PARCEL_NOT_FOUND, type TerminalItem, type TerminalParty, type
 import { TerminalError } from "../terminal/client";
 import { getShippingSettings, exchangeRatesObject, tiersOf } from "./shipping-settings";
 import { billedWeightKg, computeShippingTotal, manualShippingTotal, needsManualQuote, PricingError } from "./shipment-pricing";
-import { setStatus, SYSTEM, uniqueReference, type Actor } from "./shipments";
-import { resolveLocation } from "./locations";
+import { setStatus, SYSTEM, uniqueReference, CONTACT_LOCKED, PREPAY_STATUSES, type Actor } from "./shipments";
+import { resolveLocation, assertPhonesMatchCountry } from "./locations";
 import { publicCarrierName } from "../public-text";
 import { User } from "../../models/User";
 import { flowOf, type StaffCreateShipmentInput } from "../validation/shipment";
@@ -75,6 +75,61 @@ function partyForTerminal(p: PartyLike, whose: string): TerminalParty {
     country: p.country,
     zip: p.zip || undefined,
   };
+}
+
+const countryName = (code: string): string => {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "region" }).of(code.toUpperCase()) ?? code;
+  } catch {
+    return code;
+  }
+};
+
+/**
+ * Create an address on the carrier. When it refuses the address (a phone number from another country, a state or
+ * postcode it does not know) the customer is told which detail to fix, and which field it is, instead of a generic
+ * "could not get a quote". An address of our own office is not the customer's to fix, so that stays a plain failure.
+ */
+const addressCache = new Map<string, { id: string; at: number }>();
+const ADDRESS_TTL_MS = 20 * 60 * 1000;
+
+/**
+ * An address already accepted by the carrier is reused for a short while (checking it, then pricing it, then creating the
+ * shipment is one address, not three). The key is EVERYTHING that goes to the carrier, phone included, so a corrected
+ * number is a different key and the old one can never be sent again for it.
+ */
+async function createAddressFor(api: ReturnType<typeof terminal>, party: TerminalParty, who: "sender" | "receiver" | "office"): Promise<string> {
+  const key = JSON.stringify([party.name, party.phone, party.email ?? "", party.line1, party.line2 ?? "", party.city, party.state, party.country, party.zip ?? ""]);
+  const hit = addressCache.get(key);
+  if (hit && Date.now() - hit.at < ADDRESS_TTL_MS) return hit.id;
+  try {
+    const id = await api.createAddress(party);
+    if (addressCache.size > 500) addressCache.clear();
+    addressCache.set(key, { id, at: Date.now() });
+    return id;
+  } catch (err) {
+    if (who === "office" || !(err instanceof TerminalError) || (err.status !== 400 && err.status !== 422)) throw err;
+    const whose = who === "sender" ? "The sender's" : "The receiver's";
+    const place = countryName(party.country);
+    const said = err.message.toLowerCase();
+    console.warn(`[terminal] ${who} address refused: ${err.message}`);
+    let field = "address";
+    let text = `${whose} address could not be accepted. Check the street, city, state and postcode.`;
+    if (/phone/.test(said)) {
+      field = "phone";
+      text = `${whose} phone number does not match ${place}. Use a ${place} number, or change the country to where the number is from.`;
+    } else if (/state|province|region/.test(said)) {
+      field = "state";
+      text = `${whose} state "${party.state}" was not accepted for ${place}. Choose it from the list.`;
+    } else if (/city|town/.test(said)) {
+      field = "city";
+      text = `${whose} city "${party.city}" was not accepted for ${place}. Choose it from the list.`;
+    } else if (/zip|postal|post ?code/.test(said)) {
+      field = "zip";
+      text = `${whose} postcode "${party.zip ?? ""}" was not accepted for ${place}. Check it and try again.`;
+    }
+    throw Object.assign(new ApiError(text, 422, { [`${who}.${field}`]: [text] }), { cause: err });
+  }
 }
 
 function weightKg(shipment: ShipmentHydrated): number {
@@ -176,11 +231,15 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
   const api = terminal();
 
   if (!t.pickupAddressId) {
-    t.pickupAddressId = await api.createAddress(originParty(settings, shipment.sender, shipment.flow).party);
+    const origin = originParty(settings, shipment.sender, shipment.flow);
+    if (origin.kind === "sender") await assertPhonesMatchCountry([{ who: "sender", phone: origin.party.phone, country: origin.party.country }]);
+    t.pickupAddressId = await createAddressFor(api, origin.party, origin.kind === "office" ? "office" : "sender");
     await shipment.save();
   }
   if (!t.deliveryAddressId) {
-    t.deliveryAddressId = await api.createAddress(partyForTerminal(shipment.receiver, "The receiver's"));
+    const destination = partyForTerminal(shipment.receiver, "The receiver's");
+    await assertPhonesMatchCountry([{ who: "receiver", phone: destination.phone, country: destination.country }]);
+    t.deliveryAddressId = await createAddressFor(api, destination, "receiver");
     await shipment.save();
   }
   if (!t.packagingId) {
@@ -234,6 +293,95 @@ export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<s
     await shipment.save();
   }
   return t.shipmentId!;
+}
+
+/** Test hook: forget the addresses the carrier has accepted. */
+export function resetAddressCache(): void {
+  addressCache.clear();
+}
+
+/**
+ * Before the customer moves on from the address step: are the numbers and addresses ones the carrier will accept?
+ * Checks each phone against its country, then has the carrier accept the addresses that will really be used (the
+ * receiver always; the sender when the carrier collects from them). Throws a plain error naming the field to fix.
+ */
+export async function verifyAddresses(input: { shipmentType: "interstate" | "international"; flow?: "export" | "global" | null; sender: PartyLike; receiver: PartyLike }): Promise<void> {
+  const settings = await getShippingSettings();
+  const origin = originParty(settings, input.sender, input.flow);
+  const sender = partyForTerminal(input.sender, "The sender's");
+  const receiver = partyForTerminal(input.receiver, "The receiver's");
+  await assertPhonesMatchCountry([
+    { who: "sender", phone: sender.phone, country: sender.country },
+    { who: "receiver", phone: receiver.phone, country: receiver.country },
+  ]);
+  if (!isTerminalConfigured) return;
+  const api = terminal();
+  const jobs = [createAddressFor(api, receiver, "receiver")];
+  if (origin.kind === "sender") jobs.push(createAddressFor(api, sender, "sender"));
+  try {
+    await Promise.all(jobs);
+  } catch (err) {
+    return asApiError(err);
+  }
+}
+
+/**
+ * Correct a phone number on a shipment that is not with the carrier yet. The corrected number is checked first, then
+ * everything built from the old one is dropped (the saved carrier addresses, the draft shipment, the prices that
+ * belonged to it) so the carrier is only ever sent the new number.
+ */
+export async function correctContactPhone(shipment: ShipmentHydrated, who: "sender" | "receiver", rawPhone: string, actor: Actor): Promise<ShipmentHydrated> {
+  if (CONTACT_LOCKED.includes(shipment.status as never)) {
+    throw new ApiError("This shipment is already with the carrier, so the number can no longer be changed here. Please contact us.", 409);
+  }
+  const party = shipment[who];
+  const phone = toInternationalPhone(rawPhone, party.country, { strict: true });
+  if (!phone) throw new ApiError(`That phone number is not valid. ${phoneProblem(party.country)}.`, 422, { [`${who}.phone`]: [phoneProblem(party.country)] });
+  if (phone === party.phone) return shipment;
+
+  await assertPhonesMatchCountry([{ who, phone, country: party.country }]);
+  const settings = await getShippingSettings();
+  const origin = originParty(settings, shipment.sender, shipment.flow);
+  const used = who === "receiver" || origin.kind === "sender";
+  // Have the carrier accept the new number before anything is changed, so a number it refuses changes nothing.
+  if (used && isTerminalConfigured) {
+    const next = { name: party.name, phone, email: party.email, line1: party.line1, line2: party.line2, city: party.city, state: party.state, country: party.country, zip: party.zip };
+    await createAddressFor(terminal(), partyForTerminal(next, who === "sender" ? "The sender's" : "The receiver's"), who);
+  }
+
+  party.phone = phone;
+  const t = shipment.terminal;
+  if (used) {
+    if (who === "sender") t.pickupAddressId = undefined;
+    else t.deliveryAddressId = undefined;
+    // The draft shipment and the prices were made from the old address.
+    const hadDraft = Boolean(t.shipmentId);
+    t.shipmentId = undefined;
+    if (hadDraft || shipment.quote.options.some((o) => !o.estimated && !o.manual)) t.rebookRequired = true;
+  }
+  shipment.quote.addressProblem = undefined;
+  shipment.quote.prepayError = undefined;
+  shipment.statusHistory.push({
+    status: shipment.status,
+    note: `${who === "sender" ? "Sender" : "Receiver"} phone number corrected`,
+    byRole: actor.role,
+    byName: actor.name,
+    at: new Date(),
+  });
+  await shipment.save();
+
+  // Prices that were fetched for the old draft are fetched again; advance prices that never loaded are tried again.
+  if (!shipment.shippingPaidAt) {
+    const realOptions = shipment.quote.options.some((o) => !o.estimated && !o.manual);
+    try {
+      if (realOptions && shipment.status === "quote_sent") await fetchAndPriceRates(shipment);
+      else if (shipment.shipmentType === "international" && !shipment.quote.prepayOffered && PREPAY_STATUSES.includes(shipment.status as never)) await offerPrepay(shipment);
+    } catch (err) {
+      shipment.quote.addressProblem = err instanceof ApiError && err.details ? err.message : undefined;
+      await shipment.save().catch(() => undefined);
+    }
+  }
+  return shipment;
 }
 
 export type RateFetchResult = {
@@ -376,10 +524,17 @@ export async function priceRoute(input: {
   const origin = originParty(settings, input.sender, input.flow);
   const dims = packageDims(input.parcel.dimensions, input.shipmentType === "international");
   const destination = partyForTerminal(input.receiver, "The receiver's");
+  await assertPhonesMatchCountry([
+    ...(origin.kind === "sender" ? [{ who: "sender" as const, phone: origin.party.phone, country: origin.party.country }] : []),
+    { who: "receiver", phone: destination.phone, country: destination.country },
+  ]);
 
   try {
     const api = terminal();
-    const [from, to] = await Promise.all([api.createAddress(origin.party), api.createAddress(destination)]);
+    const [from, to] = await Promise.all([
+      createAddressFor(api, origin.party, origin.kind === "office" ? "office" : "sender"),
+      createAddressFor(api, destination, "receiver"),
+    ]);
     const packagingId = await api.createPackaging({ name: "Rate check", weightKg: PACKAGING_KG, ...dims });
     const parcelId = await api.createParcel({
       packagingId,
@@ -453,6 +608,7 @@ export async function offerPrepay(shipment: ShipmentHydrated): Promise<boolean> 
       shipment.quote.selectedRateId = undefined;
       shipment.quote.prepayOffered = true;
       shipment.quote.prepayError = undefined;
+      shipment.quote.addressProblem = undefined;
       await shipment.save();
       return true;
     }
@@ -462,6 +618,8 @@ export async function offerPrepay(shipment: ShipmentHydrated): Promise<boolean> 
     const message = cause instanceof Error ? cause.message : err instanceof Error ? err.message : String(err);
     console.warn(`[shipments] ${shipment.reference}: no advance price offered: ${message}`);
     shipment.quote.prepayError = message.slice(0, 300);
+    // A refused phone number or address detail is something the customer can correct, so they are told which.
+    shipment.quote.addressProblem = err instanceof ApiError && err.details ? err.message.slice(0, 400) : undefined;
   }
   await shipment.save().catch(() => undefined);
   return false;

@@ -6,7 +6,7 @@ import { enforceRateLimit } from "../lib/rate-limit";
 import { connectToDatabase } from "../lib/db";
 import { Shipment } from "../models/Shipment";
 import { env } from "../lib/env";
-import { createShipmentSchema, ratesRequestSchema, payShippingSchema, cancelSchema, flowOf } from "../lib/validation/shipment";
+import { createShipmentSchema, ratesRequestSchema, payShippingSchema, cancelSchema, flowOf, partySchema, contactSchema } from "../lib/validation/shipment";
 import {
   createShipmentRequest,
   findOwnShipment,
@@ -17,8 +17,8 @@ import {
 import { getShippingSettings } from "../lib/services/shipping-settings";
 import { PREPAY_STATUSES, setStatus, SYSTEM } from "../lib/services/shipments";
 import { initializeShippingPayment } from "../lib/services/shipment-payment";
-import { estimateRates, syncTracking, offerPrepay, priceRoute, openCarrierQuote } from "../lib/services/shipment-terminal";
-import { resolveLocation } from "../lib/services/locations";
+import { estimateRates, syncTracking, offerPrepay, priceRoute, openCarrierQuote, verifyAddresses, correctContactPhone } from "../lib/services/shipment-terminal";
+import { resolveLocation, assertPhonesMatchCountry } from "../lib/services/locations";
 import { publicCarrierName } from "../lib/public-text";
 import { MAX_AUTO_QUOTE_KG } from "../config/shipping";
 
@@ -159,6 +159,46 @@ shipmentsRouter.post(
   }),
 );
 
+const checkAddressesSchema = z.object({
+  shipmentType: z.enum(["interstate", "international"]),
+  flow: z.enum(["export", "global"]).optional(),
+  sender: partySchema,
+  receiver: partySchema,
+});
+
+/** POST /api/shipments/check-addresses: are these phone numbers and addresses ones the carrier will accept? Called before moving on from the address step. */
+shipmentsRouter.post(
+  "/check-addresses",
+  asyncHandler(async (req, res) => {
+    const session = requireSession(req);
+    enforceRateLimit(req, `shipment-check:${session.sub}`, { limit: 60, windowMs: 10 * 60 * 1000 });
+    const input = parse(checkAddressesSchema, req.body);
+    await connectToDatabase();
+    const from = await resolveLocation(input.sender, "sender");
+    const to = await resolveLocation(input.receiver, "receiver");
+    await verifyAddresses({
+      shipmentType: input.shipmentType,
+      flow: flowOf(input.shipmentType, input.flow, from.country),
+      sender: { ...input.sender, country: from.country, state: from.state, city: from.city },
+      receiver: { ...input.receiver, country: to.country, state: to.state, city: to.city },
+    });
+    return ok(res, { ok: true });
+  }),
+);
+
+/** POST /api/shipments/:reference/contact: correct the sender's or receiver's phone number before the carrier has the shipment. */
+shipmentsRouter.post(
+  "/:reference/contact",
+  asyncHandler(async (req, res) => {
+    const session = requireSession(req);
+    enforceRateLimit(req, "shipment-contact", { limit: 20, windowMs: 10 * 60 * 1000 });
+    const { who, phone } = parse(contactSchema, req.body);
+    const shipment = await findOwnShipment(session.sub, req.params.reference);
+    await correctContactPhone(shipment, who, phone, { id: session.sub, name: session.name ?? "Customer", role: "customer" });
+    return ok(res, { shipment: await serializeOne(shipment) });
+  }),
+);
+
 /** POST /api/shipments: create a shipment (and, for pickup, its rider booking). */
 shipmentsRouter.post(
   "/",
@@ -166,6 +206,11 @@ shipmentsRouter.post(
     const session = requireSession(req);
     enforceRateLimit(req, "shipment-create", { limit: 60, windowMs: 10 * 60 * 1000 });
     const input = parse(createShipmentSchema, req.body);
+    // A number that does not belong to its country stops here, before anything is created.
+    await assertPhonesMatchCountry([
+      { who: "sender", phone: input.sender.phone, country: input.sender.country },
+      { who: "receiver", phone: input.receiver.phone, country: input.receiver.country },
+    ]);
     const shipment = await createShipmentRequest(session.sub, input);
     if (shipment.handover.method === "carrier") {
       // No office stop: the carrier prices it for real and it opens for payment. If it cannot be priced, it is not kept.

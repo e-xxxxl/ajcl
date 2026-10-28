@@ -59,6 +59,33 @@ export async function getCountries(): Promise<TerminalCountry[]> {
   }
 }
 
+/**
+ * A phone number must start with the dial code of the country of its address; the carrier refuses it otherwise.
+ * Throws a plain error naming whose number it is and which field to fix. If the country list is not available the
+ * check is skipped (the carrier has the last word).
+ */
+export async function assertPhonesMatchCountry(parties: { who: "sender" | "receiver"; phone: string; country: string }[]): Promise<void> {
+  let countries: TerminalCountry[];
+  try {
+    countries = await getCountries();
+  } catch {
+    return;
+  }
+  const details: Record<string, string[]> = {};
+  let first = "";
+  for (const p of parties) {
+    const dial = (countries.find((c) => c.code === p.country.toUpperCase())?.phonecode ?? "").replace(/\D/g, "");
+    const digits = p.phone.replace(/\D/g, "");
+    if (!dial || !digits || digits.startsWith(dial) || (dial.startsWith("1") && digits.startsWith("1"))) continue;
+    const name = countries.find((c) => c.code === p.country.toUpperCase())?.name ?? p.country;
+    const whose = p.who === "sender" ? "The sender's" : "The receiver's";
+    const text = `${whose} phone number does not match ${name}. It should start with +${dial}. Use a ${name} number, or change the country to where the number is from.`;
+    details[`${p.who}.phone`] = [text];
+    first ||= text;
+  }
+  if (first) throw new ApiError(first, 422, details);
+}
+
 export async function getStates(countryCode: string): Promise<TerminalState[]> {
   const code = countryCode.trim().toUpperCase();
   try {
