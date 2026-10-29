@@ -342,7 +342,7 @@ export function welcomeEmail(params: { name?: string }): {
     preview: "Welcome to AJ Courier & Logistics",
     heading: `Welcome${params.name ? `, ${params.name}` : ""}!`,
     paragraphs: [
-      `Your ${site.name} account is ready. Book a bike, mini van or mini truck in minutes — with the full fare shown upfront and live tracking from pickup to drop-off.`,
+      `Your ${site.name} account is ready. Book a bike, mini van, cargo van or mini truck in minutes, with the full fare shown upfront and live tracking from pickup to drop-off.`,
     ],
     cta: { label: "Book a delivery", href: "/book" },
   });

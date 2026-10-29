@@ -1,6 +1,7 @@
 import { connectToDatabase } from "../db";
 import { Booking } from "../../models/Booking";
 import { Payment } from "../../models/Payment";
+import { RevenueReset } from "../../models/RevenueReset";
 import { User } from "../../models/User";
 import { partnerOutstandingTotals } from "./partner";
 
@@ -16,16 +17,42 @@ export type AdminStats = {
   partnersOwing: number;
   revenue: number;
   revenueThisMonth: number;
+  /** When revenue was last cleared, and what it stood at then. Totals above count only what was paid after this. */
+  revenueClearedAt?: string;
+  revenueClearedTotal?: number;
   customers: number;
   recentBookings: number;
 };
 
+/** When a payment counted: the day it was paid (or, if that was never recorded, when it was started). */
+const PAID_WHEN = { $ifNull: ["$paidAt", "$createdAt"] };
+
+async function revenueTotal(since?: Date | null): Promise<number> {
+  const agg = await Payment.aggregate<{ _id: null; total: number }>([
+    { $match: { status: "success", ...(since ? { $expr: { $gte: [PAID_WHEN, since] } } : {}) } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  return agg[0]?.total ?? 0;
+}
+
+/** Clear revenue: the totals start again from now. Payment records are kept. */
+export async function resetRevenue(byName: string): Promise<{ clearedTotal: number; at: Date }> {
+  await connectToDatabase();
+  const previous = await RevenueReset.findOne({ key: "revenue" }).lean();
+  const clearedTotal = await revenueTotal(previous?.at);
+  const at = new Date();
+  await RevenueReset.findOneAndUpdate({ key: "revenue" }, { $set: { at, clearedTotal, byName } }, { upsert: true });
+  return { clearedTotal, at };
+}
+
 export async function getAdminStats(): Promise<AdminStats> {
   await connectToDatabase();
 
+  const cleared = await RevenueReset.findOne({ key: "revenue" }).lean();
   const startOfMonth = new Date();
   startOfMonth.setDate(1);
   startOfMonth.setHours(0, 0, 0, 0);
+  const monthFrom = cleared && cleared.at > startOfMonth ? cleared.at : startOfMonth;
   const weekAgo = new Date(Date.now() - 7 * 86400_000);
 
   const [
@@ -49,14 +76,8 @@ export async function getAdminStats(): Promise<AdminStats> {
     Booking.countDocuments({ status: "returned" }),
     User.countDocuments({ role: "customer" }),
     Booking.countDocuments({ createdAt: { $gte: weekAgo } }),
-    Payment.aggregate<{ _id: null; total: number }>([
-      { $match: { status: "success" } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
-    Payment.aggregate<{ _id: null; total: number }>([
-      { $match: { status: "success", paidAt: { $gte: startOfMonth } } },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
-    ]),
+    revenueTotal(cleared?.at),
+    revenueTotal(monthFrom),
     partnerOutstandingTotals(),
   ]);
 
@@ -69,8 +90,10 @@ export async function getAdminStats(): Promise<AdminStats> {
     returnedBookings,
     partnerOutstanding: partnerTotals.outstanding,
     partnersOwing: partnerTotals.partnersOwing,
-    revenue: revenueAgg[0]?.total ?? 0,
-    revenueThisMonth: revenueMonthAgg[0]?.total ?? 0,
+    revenue: revenueAgg,
+    revenueThisMonth: revenueMonthAgg,
+    revenueClearedAt: cleared ? new Date(cleared.at).toISOString() : undefined,
+    revenueClearedTotal: cleared ? cleared.clearedTotal : undefined,
     customers,
     recentBookings,
   };

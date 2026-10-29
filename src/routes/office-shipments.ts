@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { ok, asyncHandler, parse, ApiError } from "../lib/api";
-import { requireOffice, requireAdmin } from "../lib/auth/middleware";
+import { requireOffice, requireAdmin, requireSuperAdmin } from "../lib/auth/middleware";
 import type { SessionClaims } from "../lib/auth/jwt";
 import { connectToDatabase } from "../lib/db";
 import { Shipment } from "../models/Shipment";
@@ -22,6 +22,7 @@ import {
   viewOfficeCode,
   confirmWeight,
   cancelShipment,
+  deleteShipment,
   setStatus,
   serializeMany,
   serializeOne,
@@ -308,6 +309,16 @@ officeShipmentsRouter.post(
     if (!isTerminalConfigured) throw new ApiError("Terminal Africa is not configured.", 503);
     await syncTracking(shipment);
     return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
+  }),
+);
+
+/** DELETE /api/office/shipments/:reference: delete a shipment and its payments for good. Super Admin only. */
+officeShipmentsRouter.delete(
+  "/:reference",
+  asyncHandler(async (req, res) => {
+    requireSuperAdmin(req);
+    const shipment = await findShipmentByReference(req.params.reference);
+    return ok(res, await deleteShipment(shipment));
   }),
 );
 

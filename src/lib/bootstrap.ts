@@ -3,7 +3,7 @@ import { env } from "./env";
 import { User } from "../models/User";
 import { Vehicle } from "../models/Vehicle";
 import { Booking } from "../models/Booking";
-import { VEHICLE_SEEDS } from "../config/pricing";
+import { VEHICLE_SEEDS, VEHICLES_ADDED_LATER } from "../config/pricing";
 import { hashPassword } from "./auth/password";
 import { ensureHandoverCodes } from "./services/handover";
 
@@ -41,6 +41,25 @@ export async function ensureBootstrapped(): Promise<void> {
       );
       console.info(`[bootstrap] seeded ${VEHICLE_SEEDS.length} vehicles`);
     } else {
+      // Vehicles added to the catalogue after the first launch: add any this database does not have yet.
+      for (const v of VEHICLE_SEEDS.filter((s) => VEHICLES_ADDED_LATER.includes(s.slug))) {
+        if (await Vehicle.exists({ slug: v.slug })) continue;
+        await Vehicle.create({
+          slug: v.slug,
+          name: v.name,
+          description: v.description,
+          image: v.image,
+          capacity: v.capacity,
+          pricePerKm: v.pricePerKm,
+          basePrice: v.basePrice,
+          minimumFare: v.minimumFare,
+          averageSpeedKmh: v.averageSpeedKmh,
+          fleetSize: v.fleetSize,
+          active: v.active,
+          sortOrder: v.sortOrder,
+        });
+        console.info(`[bootstrap] added ${v.name} to the vehicle list`);
+      }
       // Backfill the seed rate for any seeded vehicle that was never priced
       // (pricePerKm still 0). Never touches a vehicle an admin has already
       // configured, so it's safe to run on every boot.

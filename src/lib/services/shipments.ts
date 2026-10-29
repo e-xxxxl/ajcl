@@ -2,6 +2,9 @@ import { connectToDatabase } from "../db";
 import { Shipment, type ShipmentDoc, type ShipmentHydrated } from "../../models/Shipment";
 import { Booking, type BookingHydrated } from "../../models/Booking";
 import { User } from "../../models/User";
+import { Payment } from "../../models/Payment";
+import { Notification } from "../../models/Notification";
+import { hardDeleteBookings } from "./booking-purge";
 import { ApiError } from "../api";
 import { createBooking, changeBookingStatus } from "./booking";
 import { getShippingSettings } from "./shipping-settings";
@@ -53,6 +56,24 @@ export function setStatus(shipment: ShipmentHydrated, status: ShipmentStatus, ac
     byName: actor.name,
     at: new Date(),
   });
+}
+
+/**
+ * Delete a shipment for good (Super Admin). Its money goes with it: every payment recorded for it, including the
+ * pickup fee, is removed, so it no longer counts in revenue. Its rider pickup booking, notices and history go too.
+ * A shipment already booked with the carrier is NOT cancelled there; that is done with the carrier.
+ */
+export async function deleteShipment(shipment: ShipmentHydrated): Promise<{ reference: string; removedPayments: number; removedAmount: number }> {
+  await connectToDatabase();
+  const pickup = shipment.handover?.pickupBooking;
+  const paymentFilter = { $or: [{ shipment: shipment._id }, ...(pickup ? [{ booking: pickup }, { bundledBooking: pickup }] : [])] };
+  const paid = await Payment.find({ ...paymentFilter, status: "success" }).select("amount").lean();
+  const removedAmount = paid.reduce((n, p) => n + (p.amount ?? 0), 0);
+  const removed = await Payment.deleteMany(paymentFilter);
+  if (pickup) await hardDeleteBookings({ _id: pickup });
+  await Notification.deleteMany({ href: { $regex: shipment.reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") } });
+  await Shipment.deleteOne({ _id: shipment._id });
+  return { reference: shipment.reference, removedPayments: removed.deletedCount ?? 0, removedAmount };
 }
 
 export async function findShipmentByReference(reference: string): Promise<ShipmentHydrated> {

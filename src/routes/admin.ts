@@ -15,7 +15,8 @@ import { Payment } from "../models/Payment";
 import { Vehicle } from "../models/Vehicle";
 import { Notification } from "../models/Notification";
 import { serializeBooking, serializeVehicle } from "../lib/serialize";
-import { getAdminStats, listBookingsForAdmin } from "../lib/services/admin";
+import { getAdminStats, listBookingsForAdmin, resetRevenue } from "../lib/services/admin";
+import { hardDeleteBookings } from "../lib/services/booking-purge";
 import { changeBookingStatus } from "../lib/services/booking";
 import { activeUnitsBySlug } from "../lib/services/fleet";
 import { assignRiderToBooking, resetHandoverLock } from "../lib/services/rider";
@@ -80,6 +81,22 @@ adminRouter.post(
         superAdmin,
       },
     });
+  }),
+);
+
+const revenueResetSchema = z.object({
+  /** Must equal "RESET": a deliberate-action guard. */
+  confirm: z.literal("RESET"),
+});
+
+/** POST /api/admin/revenue/reset: clear the revenue totals (Super Admin). Payment records are kept; the totals start again from now. */
+adminRouter.post(
+  "/revenue/reset",
+  asyncHandler(async (req, res) => {
+    const session = requireSuperAdmin(req);
+    parse(revenueResetSchema, req.body ?? {});
+    const result = await resetRevenue(session.name ?? "Super Admin");
+    return ok(res, { clearedTotal: result.clearedTotal, clearedAt: result.at.toISOString() });
   }),
 );
 
@@ -395,21 +412,6 @@ adminRouter.post(
 
 /* ── Super-admin: delete bookings ──────────────────────────────────────── */
 
-/** Remove a booking and everything that hangs off it. */
-async function hardDeleteBookings(filter: Record<string, unknown>): Promise<number> {
-  const bookings = await Booking.find(filter).select("_id").lean();
-  const ids = bookings.map((b) => b._id);
-  if (ids.length === 0) return 0;
-  await Promise.all([
-    HandoverProof.deleteMany({ booking: { $in: ids } }),
-    deleteProofPhotos({ booking: { $in: ids } }),
-    Payment.deleteMany({ booking: { $in: ids } }),
-    StatusHistory.deleteMany({ booking: { $in: ids } }),
-    Notification.deleteMany({ booking: { $in: ids } }),
-    Booking.deleteMany({ _id: { $in: ids } }),
-  ]);
-  return ids.length;
-}
 
 /** DELETE /api/admin/bookings/:reference — permanently delete one booking. */
 adminRouter.delete(

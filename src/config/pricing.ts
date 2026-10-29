@@ -67,7 +67,28 @@ export const VEHICLE_SEEDS: VehicleSeed[] = [
     active: true,
     sortOrder: 3,
   },
+  {
+    slug: "cargo-van",
+    name: "Cargo Van",
+    description:
+      "Full-size cargo van for bulk loads, stock, equipment and large boxes up to 1,000 kg.",
+    image: "/vehicles/cargo-van.jpeg",
+    pricePerKm: 1500,
+    basePrice: 0,
+    minimumFare: 0,
+    capacity: "Up to 1,000 kg · bulk cargo & stock",
+    averageSpeedKmh: 27,
+    fleetSize: 0,
+    active: true,
+    sortOrder: 4,
+  },
 ];
+
+/**
+ * Seeded vehicles that were added after the first launch. A database that already has vehicles gets any of these it is
+ * missing once, on start-up. (To retire one, set it inactive in the admin; deleting it would add it back.)
+ */
+export const VEHICLES_ADDED_LATER = ["cargo-van"];
 
 export const PRICING_RULES = {
   perStopFee: 0,
