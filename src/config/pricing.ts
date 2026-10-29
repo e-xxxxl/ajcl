@@ -72,7 +72,7 @@ export const VEHICLE_SEEDS: VehicleSeed[] = [
     name: "Cargo Van",
     description:
       "Full-size cargo van for bulk loads, stock, equipment and large boxes up to 1,000 kg.",
-    image: "/vehicles/cargo-van.jpeg",
+    image: "/vehicles/cargo-van.png",
     pricePerKm: 1500,
     basePrice: 0,
     minimumFare: 0,

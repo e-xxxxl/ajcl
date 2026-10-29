@@ -60,6 +60,8 @@ export async function ensureBootstrapped(): Promise<void> {
         });
         console.info(`[bootstrap] added ${v.name} to the vehicle list`);
       }
+      // The cargo van photo is now a transparent PNG; a database that stored the first (jpeg) path gets the new one.
+      await Vehicle.updateOne({ slug: "cargo-van", image: "/vehicles/cargo-van.jpeg" }, { $set: { image: "/vehicles/cargo-van.png" } });
       // Backfill the seed rate for any seeded vehicle that was never priced
       // (pricePerKm still 0). Never touches a vehicle an admin has already
       // configured, so it's safe to run on every boot.
