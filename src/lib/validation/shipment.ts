@@ -239,6 +239,24 @@ export const markBookedSchema = z.object({
   trackingUrl: z.string().trim().url().max(400).optional().or(z.literal("")),
 });
 
+/** Interstate (hand-run): who has the parcel. The driver's number is what the customer is given instead of a tracking number. */
+export const dispatchSchema = z.object({
+  driverName: z.string().trim().max(120).optional(),
+  driverPhone: z.string().trim().min(7, "Enter the driver's phone number").max(30),
+  note: z.string().trim().max(500).optional(),
+});
+
+/** Interstate (hand-run): move the delivery along, with a note the customer can read. */
+export const deliveryStatusSchema = z.object({
+  status: z.enum(["in_transit", "delivered"]),
+  note: z.string().trim().max(500).optional(),
+});
+
+/** Interstate (hand-run): a progress update for the customer with no change of status. */
+export const deliveryUpdateSchema = z.object({
+  note: z.string().trim().min(3, "Write the update").max(500),
+});
+
 export const refundSchema = z.object({
   /** Which payment is being refunded. */
   target: z.enum(["pickup_fee", "shipping"]).default("pickup_fee"),

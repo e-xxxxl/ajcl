@@ -182,6 +182,18 @@ const shipmentSchema = new Schema(
       events: { type: [trackingEventSchema], default: [] },
     },
 
+    /**
+     * Interstate shipments are run by hand (no carrier service): the driver who has the parcel. The customer sees this
+     * where an international shipment shows its tracking number.
+     */
+    dispatch: {
+      driverName: { type: String, trim: true, maxlength: 120 },
+      driverPhone: { type: String, trim: true, maxlength: 30 },
+      note: { type: String, trim: true, maxlength: 500 },
+      at: { type: Date },
+      byName: { type: String, trim: true },
+    },
+
     /** Set when staff created this shipment on the admin side (walk-in, phone or repeat customer). */
     createdByStaff: {
       by: { type: Schema.Types.ObjectId, ref: "User" },

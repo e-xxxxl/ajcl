@@ -133,6 +133,9 @@ shipmentsRouter.post(
     const session = requireSession(req);
     enforceRateLimit(req, `shipment-rates:${session.sub}`, { limit: 30, windowMs: 60 * 60 * 1000 });
     const input = parse(ratesRequestSchema, req.body);
+    if (input.shipmentType === "interstate") {
+      throw new ApiError("Interstate shipments are priced by our team after your package is weighed.", 409);
+    }
     await connectToDatabase();
     const from = await resolveLocation(input.sender, "sender");
     const to = await resolveLocation(input.receiver, "receiver");

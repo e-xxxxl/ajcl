@@ -44,6 +44,13 @@ export function asApiError(err: unknown): never {
   throw err;
 }
 
+/** Interstate shipments are run by hand (price, driver, updates) and never touch the carrier service. */
+function refuseInterstate(shipment: { shipmentType: string }, what: string): void {
+  if (shipment.shipmentType === "interstate") {
+    throw new ApiError(`${what} is for international shipments. Interstate shipments are priced and run by hand: set the price, then assign a driver.`, 409);
+  }
+}
+
 /** The phone number in the form Terminal accepts, or a plain-English error that says whose number is wrong. */
 function carrierPhone(raw: string, country: string, whose: string): string {
   const phone = toInternationalPhone(raw, country);
@@ -226,6 +233,7 @@ function originParty(
  * the shipment, so a retry resumes where the last attempt stopped instead of duplicating.
  */
 export async function ensureTerminalDraft(shipment: ShipmentHydrated): Promise<string> {
+  refuseInterstate(shipment, "Saving a draft with the carrier");
   const settings = await getShippingSettings();
   const t = shipment.terminal;
   const api = terminal();
@@ -314,7 +322,7 @@ export async function verifyAddresses(input: { shipmentType: "interstate" | "int
     { who: "sender", phone: sender.phone, country: sender.country },
     { who: "receiver", phone: receiver.phone, country: receiver.country },
   ]);
-  if (!isTerminalConfigured) return;
+  if (!isTerminalConfigured || input.shipmentType === "interstate") return;
   const api = terminal();
   const jobs = [createAddressFor(api, receiver, "receiver")];
   if (origin.kind === "sender") jobs.push(createAddressFor(api, sender, "sender"));
@@ -342,7 +350,7 @@ export async function correctContactPhone(shipment: ShipmentHydrated, who: "send
   await assertPhonesMatchCountry([{ who, phone, country: party.country }]);
   const settings = await getShippingSettings();
   const origin = originParty(settings, shipment.sender, shipment.flow);
-  const used = who === "receiver" || origin.kind === "sender";
+  const used = shipment.shipmentType === "international" && (who === "receiver" || origin.kind === "sender");
   // Have the carrier accept the new number before anything is changed, so a number it refuses changes nothing.
   if (used && isTerminalConfigured) {
     const next = { name: party.name, phone, email: party.email, line1: party.line1, line2: party.line2, city: party.city, state: party.state, country: party.country, zip: party.zip };
@@ -472,6 +480,7 @@ export async function createShipmentByStaff(
 
   // Save it in Terminal as a draft, then fetch rates so they are ready. Neither blocks the shipment itself.
   let draftWarning: string | undefined;
+  if (shipment.shipmentType === "interstate") return { shipment, draftWarning };
   try {
     await ensureTerminalDraft(shipment);
     if (!needsManualQuote(billed)) await fetchAndPriceRates(shipment);
@@ -484,6 +493,7 @@ export async function createShipmentByStaff(
 
 /** Book a staff-created shipment with no online payment: paid by transfer or cash, or not charged. Admin only. */
 export async function bookWithoutOnlinePayment(shipment: ShipmentHydrated, actor: Actor, rateId: string | undefined, note: string): Promise<ShipmentHydrated> {
+  refuseInterstate(shipment, "Booking without an online payment");
   if (!shipment.createdByStaff?.name) throw new ApiError("Only a shipment created on the admin side can be booked without an online payment.", 409);
   if (!["weight_confirmed", "quote_sent"].includes(shipment.status)) throw new ApiError("This shipment cannot be booked this way now.", 409);
   const options = shipment.quote.options.filter((o) => !o.manual);
@@ -677,6 +687,7 @@ export async function settlePrepaidAfterWeigh(shipment: ShipmentHydrated, actor:
 
 /** Fetch live carrier rates and price each one with the current tiers, fees and exchange rate. */
 export async function fetchAndPriceRates(shipment: ShipmentHydrated): Promise<RateFetchResult> {
+  refuseInterstate(shipment, "Fetching carrier rates");
   const billedKg = billedWeightKg(weightKg(shipment));
   if (needsManualQuote(billedKg)) {
     throw new ApiError(`This parcel is over ${MAX_AUTO_QUOTE_KG} kg. Enter the amount by hand instead.`, 409);
@@ -827,6 +838,7 @@ async function announceTracking(shipment: ShipmentHydrated, changed: ShipmentSta
 
 /** Pull the latest tracking from Terminal (used by polling and by the webhook handler). */
 export async function syncTracking(shipment: ShipmentHydrated): Promise<ShipmentHydrated> {
+  if (shipment.shipmentType === "interstate") return shipment; // run by hand: the office posts the updates
   const terminalId = shipment.terminal.shipmentId;
   if (!terminalId) return shipment;
   try {
@@ -878,6 +890,8 @@ const LOCK_MS = 2 * 60 * 1000;
 
 export async function bookWithTerminal(shipmentId: string, actor: Actor = SYSTEM): Promise<ShipmentHydrated> {
   await connectToDatabase();
+  const existing = await Shipment.findById(shipmentId);
+  if (existing) refuseInterstate(existing, "Booking with the carrier");
   const now = new Date();
   // Claim the booking so two requests (a webhook and a callback, or a double click) never book twice.
   const claimed = await Shipment.findOneAndUpdate(
@@ -1071,7 +1085,8 @@ export async function estimateRates(input: {
 }) {
   const settings = await getShippingSettings();
   const billedKg = billedWeightKg(input.weightKg);
-  if (needsManualQuote(billedKg)) {
+  // Interstate prices are set by the office after the parcel is weighed, so there is nothing to look up.
+  if (input.shipmentType === "interstate" || needsManualQuote(billedKg)) {
     return { manualRequired: true, billedWeightKg: billedKg, options: [], warnings: [], fxUpdatedAt: null as string | null };
   }
   const fx = exchangeRatesObject(settings);

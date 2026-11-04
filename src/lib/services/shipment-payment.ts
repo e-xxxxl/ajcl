@@ -221,7 +221,9 @@ export async function reconcileShippingPayment(
     String(moved.user),
     "shipment_paid",
     "Shipping payment received",
-    `We received your payment for shipment ${moved.reference}. We are booking it with the carrier now.`,
+    moved.shipmentType === "interstate"
+      ? `We received your payment for shipment ${moved.reference}. We are arranging a driver and will send you the driver's number once one is assigned.`
+      : `We received your payment for shipment ${moved.reference}. We are booking it with the carrier now.`,
     moved.reference,
   );
 
@@ -229,7 +231,14 @@ export async function reconcileShippingPayment(
   let finalShipment: ShipmentHydrated = moved;
   if (option?.manual) {
     // A hand-quoted shipment is booked by staff, not through Terminal.
-    await notifyOffice("admin_shipment_new", "Manual shipment paid", `${moved.reference} is paid. Book it with the carrier and record the tracking number.`, moved.reference);
+    await notifyOffice(
+      "admin_shipment_new",
+      moved.shipmentType === "interstate" ? "Paid: assign a driver" : "Manual shipment paid",
+      moved.shipmentType === "interstate"
+        ? `${moved.reference} is paid. Assign a driver and add the driver's number.`
+        : `${moved.reference} is paid. Book it with the carrier and record the tracking number.`,
+      moved.reference,
+    );
   } else {
     finalShipment = await bookWithTerminal(String(moved._id));
   }

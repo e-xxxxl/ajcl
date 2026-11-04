@@ -96,6 +96,26 @@ export const SHIPMENT_STATUS_META: Record<
   },
 };
 
+/**
+ * Interstate shipments are run by hand (no carrier service): the office sets the price and assigns a driver, so a few
+ * steps read differently. Anything not listed here reads the same as in SHIPMENT_STATUS_META.
+ */
+export const SHIPMENT_STATUS_META_HAND_RUN: Partial<Record<ShipmentStatus, { label: string; description: string }>> = {
+  weight_confirmed: { label: "Weighed and measured", description: "Your package has been weighed. We are working out your price." },
+  quote_sent: { label: "Price ready", description: "Our price for your shipment is ready. Review it and pay to ship." },
+  paid: { label: "Paid", description: "Payment received. We are arranging a driver for your shipment." },
+  booked: { label: "Driver assigned", description: "A driver has your shipment. Their number is on this page." },
+  in_transit: { label: "On the way", description: "Your shipment is on its way to the destination." },
+  failed: { label: "Delivery issue", description: "There is a problem with this delivery. Our team will contact you." },
+};
+
+/** The label, description and tone of a status, worded for the kind of shipment. */
+export function shipmentStatusMeta(status: ShipmentStatus, shipmentType?: string) {
+  const base = SHIPMENT_STATUS_META[status];
+  const hand = shipmentType === "interstate" ? SHIPMENT_STATUS_META_HAND_RUN[status] : undefined;
+  return hand ? { ...base, ...hand } : base;
+}
+
 /** The happy path for each handover method, used to draw the timeline. */
 export const SHIPMENT_FLOW_PICKUP: ShipmentStatus[] = [
   "pickup_fee_pending",

@@ -15,7 +15,19 @@ import {
   staffCreateShipmentSchema,
   bookWithoutPaymentSchema,
   contactSchema,
+  dispatchSchema,
+  deliveryStatusSchema,
+  deliveryUpdateSchema,
 } from "../lib/validation/shipment";
+import {
+  isHandRun,
+  requireInternational,
+  setHandPrice,
+  markPaidByHand,
+  assignDriver,
+  advanceDelivery,
+  postDeliveryUpdate,
+} from "../lib/services/shipment-manual";
 import {
   findShipmentByReference,
   receiveAtOffice,
@@ -78,6 +90,8 @@ officeShipmentsRouter.post(
     const session = requireAdmin(req);
     const { rateId, note } = parse(bookWithoutPaymentSchema, req.body);
     const shipment = await findShipmentByReference(req.params.reference);
+    // Interstate is run by hand: record that it was paid, then assign a driver. International is booked with the carrier.
+    if (isHandRun(shipment)) return ok(res, { shipment: await serializeOne(await markPaidByHand(shipment, actorOf(session), note), { staff: true }) });
     const booked = await bookWithoutOnlinePayment(shipment, actorOf(session), rateId, note);
     return ok(res, { shipment: await serializeOne(booked, { staff: true }) });
   }),
@@ -101,6 +115,8 @@ officeShipmentsRouter.get(
         { "sender.name": new RegExp(needle, "i") },
         { "receiver.name": new RegExp(needle, "i") },
         { "terminal.trackingNumber": new RegExp(needle, "i") },
+        { "dispatch.driverPhone": new RegExp(needle, "i") },
+        { "dispatch.driverName": new RegExp(needle, "i") },
       ];
     }
 
@@ -196,6 +212,12 @@ officeShipmentsRouter.post(
     if (!["weight_confirmed", "quote_sent"].includes(shipment.status)) {
       throw new ApiError("Weigh the package before sending a quote.", 409);
     }
+    // Interstate: the office sets the price by hand. Setting it again before the customer pays updates it.
+    if (isHandRun(shipment)) {
+      if (!input.manual) throw new ApiError("Enter the price for this shipment.", 422);
+      await setHandPrice(shipment, actorOf(session), { amount: input.manual.amount, deliveryTime: input.manual.deliveryTime, note: input.note });
+      return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
+    }
 
     let options;
     if (requiresManualQuote(shipment)) {
@@ -252,6 +274,7 @@ officeShipmentsRouter.post(
     const session = requireOffice(req);
     const input = parse(markBookedSchema, req.body);
     const shipment = await findShipmentByReference(req.params.reference);
+    requireInternational(shipment, "Booking with a carrier");
     const option = shipment.quote.options.find((o) => o.rateId === shipment.quote.selectedRateId);
     if (shipment.status !== "paid" || !option?.manual) {
       throw new ApiError("Only a paid, hand-quoted shipment is booked manually.", 409);
@@ -278,8 +301,13 @@ officeShipmentsRouter.post(
   "/:reference/status",
   asyncHandler(async (req, res) => {
     const session = requireOffice(req);
-    const { status } = parse(z.object({ status: z.enum(["in_transit", "delivered"]) }), req.body);
+    const input = parse(deliveryStatusSchema, req.body);
+    const { status } = input;
     const shipment = await findShipmentByReference(req.params.reference);
+    if (isHandRun(shipment)) {
+      await advanceDelivery(shipment, actorOf(session), input);
+      return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
+    }
     const order: ShipmentStatus[] = ["booked", "in_transit", "delivered"];
     if (!shipment.terminal.bookedAt || order.indexOf(shipment.status as ShipmentStatus) < 0 || order.indexOf(status) <= order.indexOf(shipment.status as ShipmentStatus)) {
       throw new ApiError("That update does not follow from the shipment's current status.", 409);
@@ -296,6 +324,30 @@ officeShipmentsRouter.post(
       `Shipment ${shipment.reference} is now ${status === "delivered" ? "delivered" : "in transit"}.`,
       shipment.reference,
     );
+    return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
+  }),
+);
+
+/** POST /api/office/shipments/:reference/dispatch: interstate only. Who has the parcel: the driver's name and phone number. */
+officeShipmentsRouter.post(
+  "/:reference/dispatch",
+  asyncHandler(async (req, res) => {
+    const session = requireOffice(req);
+    const input = parse(dispatchSchema, req.body);
+    const shipment = await findShipmentByReference(req.params.reference);
+    await assignDriver(shipment, actorOf(session), input);
+    return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
+  }),
+);
+
+/** POST /api/office/shipments/:reference/update: interstate only. A progress note the customer can read. */
+officeShipmentsRouter.post(
+  "/:reference/update",
+  asyncHandler(async (req, res) => {
+    const session = requireOffice(req);
+    const { note } = parse(deliveryUpdateSchema, req.body);
+    const shipment = await findShipmentByReference(req.params.reference);
+    await postDeliveryUpdate(shipment, actorOf(session), note);
     return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
   }),
 );

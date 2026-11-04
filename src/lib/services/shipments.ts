@@ -524,6 +524,8 @@ export type ShipmentDTO = {
   addressProblem?: string;
   /** Whether the phone numbers can still be corrected (until the carrier has the shipment). */
   contactEditable?: boolean;
+  /** Interstate (run by hand): the driver who has the parcel, shown where an international shipment shows a tracking number. */
+  dispatch?: { driverName?: string; driverPhone: string; note?: string; at?: string; byName?: string };
   terminal: {
     carrierName?: string;
     trackingNumber?: string;
@@ -669,6 +671,15 @@ export function serializeShipment(
       draft: staff ? s.status === "weight_confirmed" && (s.quote?.options?.length ?? 0) > 0 : undefined,
     },
     addressProblem: s.quote?.addressProblem || undefined,
+    dispatch: s.dispatch?.driverPhone
+      ? {
+          driverName: s.dispatch.driverName || undefined,
+          driverPhone: s.dispatch.driverPhone,
+          note: s.dispatch.note || undefined,
+          at: iso(s.dispatch.at),
+          byName: staff ? s.dispatch.byName || undefined : undefined,
+        }
+      : undefined,
     contactEditable: !CONTACT_LOCKED.includes(s.status as ShipmentStatus),
     staff: staff
       ? {

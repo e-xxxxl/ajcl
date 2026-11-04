@@ -25,6 +25,7 @@ export const NOTIFICATION_TYPES = [
   "shipment_booked",
   "shipment_in_transit",
   "shipment_delivered",
+  "shipment_update",
   "shipment_failed",
   "admin_shipment_new",
   "admin_shipment_booking_failed",
