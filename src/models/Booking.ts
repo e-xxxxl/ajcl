@@ -62,6 +62,8 @@ const pricingSchema = new Schema(
     pricePerKm: { type: Number, required: true, min: 0 },
     basePrice: { type: Number, required: true, min: 0, default: 0 },
     distanceCharge: { type: Number, required: true, min: 0 },
+    /** The Super Admin's long-distance fee, already inside subtotal and total. Never sent to customers or other admins. */
+    extraFee: { type: Number, default: 0, min: 0 },
     stopsFee: { type: Number, required: true, min: 0, default: 0 },
     tax: { type: Number, required: true, min: 0, default: 0 },
     minimumFareApplied: { type: Boolean, default: false },

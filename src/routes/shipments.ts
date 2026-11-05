@@ -280,8 +280,8 @@ shipmentsRouter.post(
   asyncHandler(async (req, res) => {
     const session = requireSession(req);
     enforceRateLimit(req, "shipment-pay", { limit: 30, windowMs: 10 * 60 * 1000 });
-    const { rateId, includePickupFee } = parse(payShippingSchema, req.body);
-    const result = await initializeShippingPayment(session.sub, req.params.reference, rateId, Boolean(includePickupFee));
+    const { rateId, includePickupFee, expectedAmount } = parse(payShippingSchema, req.body);
+    const result = await initializeShippingPayment(session.sub, req.params.reference, rateId, Boolean(includePickupFee), expectedAmount);
     return ok(res, { ...result, provider: "paystack" });
   }),
 );

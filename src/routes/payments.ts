@@ -12,7 +12,11 @@ import { initializeBookingPayment, verifyAndReconcile, reconcilePayment } from "
 
 export const paymentsRouter = Router();
 
-const initSchema = z.object({ bookingReference: z.string().trim().min(4).max(40) });
+const initSchema = z.object({
+  bookingReference: z.string().trim().min(4).max(40),
+  /** The amount the screen showed. If the amount to charge is different, nothing is charged. */
+  expectedAmount: z.coerce.number().min(0).optional(),
+});
 
 /** POST /api/payments/initialize */
 paymentsRouter.post(
@@ -21,8 +25,8 @@ paymentsRouter.post(
     const session = requireSession(req);
     enforceRateLimit(req, "payment-init", { limit: 20, windowMs: 10 * 60 * 1000 });
 
-    const { bookingReference } = parse(initSchema, req.body);
-    const result = await initializeBookingPayment(session.sub, bookingReference);
+    const { bookingReference, expectedAmount } = parse(initSchema, req.body);
+    const result = await initializeBookingPayment(session.sub, bookingReference, expectedAmount);
 
     return ok(res, { ...result, provider: "paystack" });
   }),

@@ -20,7 +20,9 @@ export function esc(s: string): string {
 export function absUrl(href?: string): string | undefined {
   if (!href) return undefined;
   if (/^https?:\/\//i.test(href)) return href;
-  return `${env.frontendUrl}${href.startsWith("/") ? "" : "/"}${href}`;
+  // Links into the admin area go to the admin site when it has its own address.
+  const base = env.adminUrl && /^\/admin(\/|$)/.test(href) ? env.adminUrl : env.frontendUrl;
+  return `${base}${href.startsWith("/") ? "" : "/"}${href}`;
 }
 
 type LayoutInput = {

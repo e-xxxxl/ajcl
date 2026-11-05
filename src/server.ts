@@ -98,6 +98,10 @@ const server = app.listen(env.port, () => {
   console.log(`[server] AJ Courier API listening on :${env.port}`);
   console.log(`[server] CORS origins: ${allowedOrigins.join(", ")}`);
   console.log(`[terminal] base URL ${env.terminal.url}, key ${maskSecret(env.terminal.secretKey)}`);
+  console.log(
+    `[email] ${env.resendApiKey ? `Resend key ${maskSecret(env.resendApiKey)}, from "${env.emailFrom}"` : "NOT configured: set RESEND_API_KEY and EMAIL_FROM or no email will be sent"}` +
+      `; admin site ${env.adminUrl ?? "(same as the main site)"}; desk inboxes: ${env.officeInboxes.join(", ") || "(none)"}`,
+  );
   // Say right away whether Terminal accepts the key, rather than waiting for a customer to hit it.
   if (env.terminal.secretKey) {
     void terminalPing().then((p) =>

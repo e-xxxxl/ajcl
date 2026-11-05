@@ -30,7 +30,7 @@ function expand(origin: string): string[] {
 
 export const allowedOrigins: string[] = [
   ...new Set(
-    env.frontendUrls
+    [...env.frontendUrls, ...(env.adminUrl ? [env.adminUrl] : [])]
       .flatMap((s) => s.split(/[\s,;]+/))
       .map(normalise)
       .filter((o): o is string => Boolean(o))

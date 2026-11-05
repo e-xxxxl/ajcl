@@ -231,6 +231,8 @@ export const payShippingSchema = z.object({
   rateId: z.string().trim().min(1, "Choose an option"),
   /** Pay the rider's pickup fee in the same charge (international, before the pickup fee is paid). */
   includePickupFee: z.boolean().optional(),
+  /** The total the screen showed. If the amount to charge is different, nothing is charged. */
+  expectedAmount: z.coerce.number().min(0).optional(),
 });
 
 export const markBookedSchema = z.object({
@@ -266,3 +268,11 @@ export const refundSchema = z.object({
 });
 
 export const cancelSchema = z.object({ reason: z.string().trim().max(500).optional() });
+
+/** Super Admin: record a payment the system never saw. */
+export const markPaidSchema = z.object({
+  target: z.enum(["shipping", "pickup_fee"]).default("shipping"),
+  /** Which option the customer paid for, when there is more than one. */
+  rateId: z.string().trim().min(1).optional(),
+  note: z.string().trim().min(3, "Say how it was paid (for example the bank transfer reference)").max(300),
+});

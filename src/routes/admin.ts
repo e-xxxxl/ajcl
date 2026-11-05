@@ -17,6 +17,7 @@ import { Notification } from "../models/Notification";
 import { serializeBooking, serializeVehicle } from "../lib/serialize";
 import { getAdminStats, listBookingsForAdmin, resetRevenue } from "../lib/services/admin";
 import { hardDeleteBookings } from "../lib/services/booking-purge";
+import { getLongDistanceSettings, saveLongDistanceSettings } from "../lib/services/ride-settings";
 import { changeBookingStatus } from "../lib/services/booking";
 import { activeUnitsBySlug } from "../lib/services/fleet";
 import { assignRiderToBooking, resetHandoverLock } from "../lib/services/rider";
@@ -27,6 +28,8 @@ import { PartnerPayment } from "../models/PartnerPayment";
 import { getPartnerLedger, partnerBalances } from "../lib/services/partner";
 import { isActivePartner } from "../lib/services/partner-pricing";
 import { notify } from "../lib/notifications";
+import { sendEmailChecked } from "../lib/email/send";
+import { renderEmail } from "../lib/email/templates";
 import { vehicleUpsertSchema, vehiclePatchSchema } from "../lib/validation/vehicle";
 import { slugify } from "../lib/utils";
 import { env } from "../lib/env";
@@ -84,6 +87,40 @@ adminRouter.post(
   }),
 );
 
+const longDistanceSchema = z
+  .object({
+    enabled: z.boolean(),
+    thresholdKm: z.coerce.number().min(0).max(5000),
+    flatNgn: z.coerce.number().min(0).max(1_000_000),
+    perKmNgn: z.coerce.number().min(0).max(100_000),
+  })
+  .superRefine((v, ctx) => {
+    if (!v.enabled) return;
+    if (!(v.thresholdKm > 0)) ctx.addIssue({ code: "custom", path: ["thresholdKm"], message: "Enter the distance in km that the fee starts after" });
+    if (!(v.flatNgn > 0 || v.perKmNgn > 0)) ctx.addIssue({ code: "custom", path: ["flatNgn"], message: "Enter a flat fee, a fee per km beyond the distance, or both" });
+  });
+
+/** GET /api/admin/rides/long-distance: the extra fee on long rider deliveries (Super Admin only). */
+adminRouter.get(
+  "/rides/long-distance",
+  asyncHandler(async (req, res) => {
+    requireSuperAdmin(req);
+    return ok(res, { longDistance: await getLongDistanceSettings() });
+  }),
+);
+
+/** PUT /api/admin/rides/long-distance: set it. Applies to rides booked from now on; customers never see it. */
+adminRouter.put(
+  "/rides/long-distance",
+  asyncHandler(async (req, res) => {
+    const session = requireSuperAdmin(req);
+    const input = parse(longDistanceSchema, req.body);
+    const saved = await saveLongDistanceSettings(input, session.name ?? "Super Admin");
+    console.info(`[admin] ${session.name ?? session.sub} set the long-distance fee: ${JSON.stringify(input)}`);
+    return ok(res, { longDistance: saved });
+  }),
+);
+
 const revenueResetSchema = z.object({
   /** Must equal "RESET": a deliberate-action guard. */
   confirm: z.literal("RESET"),
@@ -97,6 +134,33 @@ adminRouter.post(
     parse(revenueResetSchema, req.body ?? {});
     const result = await resetRevenue(session.name ?? "Super Admin");
     return ok(res, { clearedTotal: result.clearedTotal, clearedAt: result.at.toISOString() });
+  }),
+);
+
+const testEmailSchema = z.object({ to: z.string().trim().toLowerCase().email().optional() });
+
+/**
+ * POST /api/admin/email/test: send a test email (Super Admin), and say exactly why it did not arrive if it did not.
+ * Sends to the address given, or to the signed-in admin.
+ */
+adminRouter.post(
+  "/email/test",
+  asyncHandler(async (req, res) => {
+    const session = requireSuperAdmin(req);
+    enforceRateLimit(req, `email-test:${session.sub}`, { limit: 10, windowMs: 60 * 60 * 1000 });
+    const { to } = parse(testEmailSchema, req.body ?? {});
+    await connectToDatabase();
+    const me = await User.findById(session.sub).select("email").lean();
+    const target = to ?? me?.email;
+    if (!target) throw new ApiError("Enter an address to send the test to.", 422);
+    const { html, text } = renderEmail({
+      preview: "This is a test email",
+      heading: "Email is working",
+      paragraphs: ["This is a test from the AJ Courier admin. If you are reading it, emails from the site reach this address.", `Sent from: ${env.emailFrom}`],
+      cta: { label: "Open the admin", href: "/admin" },
+    });
+    const result = await sendEmailChecked({ to: target, subject: "Test email from AJ Courier & Logistics", html, text });
+    return ok(res, { sent: result.ok, to: target, from: env.emailFrom, reason: result.reason ?? null, adminUrl: env.adminUrl ?? null, officeInboxes: env.officeInboxes });
   }),
 );
 
@@ -161,7 +225,7 @@ adminRouter.get(
 adminRouter.get(
   "/bookings/:reference",
   asyncHandler(async (req, res) => {
-    requireAdmin(req);
+    const viewer = requireAdmin(req);
     await connectToDatabase();
 
     const booking = await Booking.findOne({
@@ -178,7 +242,8 @@ adminRouter.get(
     ]);
 
     return ok(res, {
-      booking: serializeBooking(booking, { includeCustomer: true }),
+      // The long-distance fee is on the Super Admin's view of the booking only.
+      booking: serializeBooking(booking, { includeCustomer: true, showExtraFee: Boolean(viewer.superAdmin) }),
       proofs,
       audit: audit.map((a) => ({
         id: String(a._id),

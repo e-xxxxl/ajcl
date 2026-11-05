@@ -18,7 +18,9 @@ import {
   dispatchSchema,
   deliveryStatusSchema,
   deliveryUpdateSchema,
+  markPaidSchema,
 } from "../lib/validation/shipment";
+import { markShipmentPaid } from "../lib/services/shipment-payment";
 import {
   isHandRun,
   requireInternational,
@@ -361,6 +363,18 @@ officeShipmentsRouter.post(
     if (!isTerminalConfigured) throw new ApiError("Terminal Africa is not configured.", 503);
     await syncTracking(shipment);
     return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
+  }),
+);
+
+/** POST /api/office/shipments/:reference/mark-paid: record a payment the system never saw. Super Admin only. */
+officeShipmentsRouter.post(
+  "/:reference/mark-paid",
+  asyncHandler(async (req, res) => {
+    const session = requireSuperAdmin(req);
+    const input = parse(markPaidSchema, req.body);
+    const shipment = await findShipmentByReference(req.params.reference);
+    const paid = await markShipmentPaid(shipment, actorOf(session), input);
+    return ok(res, { shipment: await serializeOne(paid, { staff: true }) });
   }),
 );
 

@@ -6,6 +6,7 @@ import { User } from "../../models/User";
 import { ApiError } from "../api";
 import { generateBookingReference } from "../utils";
 import { calculatePrice } from "../pricing/engine";
+import { getLongDistanceFee } from "./ride-settings";
 import { computeRouteMetrics } from "./quote";
 import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
@@ -88,6 +89,8 @@ export async function createBooking(
     },
     // A shipment pickup is always charged the standard fare, even to a partner.
     opts.shipment ? 0 : await getPartnerMarkup(userId),
+    // The long-distance fee is for ride deliveries only.
+    opts.shipment ? { fixedNgn: 0 } : { fee: await getLongDistanceFee() },
   );
 
   const now = new Date();

@@ -50,6 +50,12 @@ export const env = {
     return this.frontendUrls[0];
   },
 
+  /**
+   * Where the admin site lives when it has its own address (for example https://admin.ajcourierlogistics.com).
+   * It is allowed to call this API, and links in emails to staff point to it. Leave unset to use the main site.
+   */
+  adminUrl: (get("ADMIN_URL") ?? "").trim().replace(/\/+$/, "") || undefined,
+
   mongodbUri: get("MONGODB_URI"),
 
   jwtSecret: get("JWT_SECRET") ?? "insecure-development-secret-change-me-please-01234567",
@@ -105,6 +111,11 @@ export const env = {
   emailFrom: get("EMAIL_FROM") ?? "AJ Courier & Logistics <onboarding@resend.dev>",
   /** Where customer replies go; also the recipient for admin alerts if ADMIN_EMAIL is unset. */
   supportEmail: get("SUPPORT_EMAIL") ?? get("ADMIN_EMAIL") ?? "info@ajcourierlogistics.com",
+  /**
+   * Shared inboxes that get a copy of the shipments desk emails (new shipment, paid, delivered), in addition to each
+   * admin's own email. A comma-separated list. ADMIN_EMAIL is always included.
+   */
+  officeInboxes: [...new Set([get("ADMIN_EMAIL"), ...(get("OFFICE_NOTIFY_EMAILS") ?? "").split(/[\s,;]+/)].map((e) => (e ?? "").trim().toLowerCase()).filter((e) => e.includes("@")))],
 };
 
 /** "sk_test****0Mz3": enough to recognise a key in a log without exposing it. */

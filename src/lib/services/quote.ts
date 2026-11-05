@@ -1,7 +1,8 @@
 import { connectToDatabase } from "../db";
 import { Vehicle } from "../../models/Vehicle";
 import { computeRoute, haversineKm, type LatLng } from "../maps/service";
-import { calculatePrice, type PricingRouteMetrics } from "../pricing/engine";
+import { calculatePrice, foldExtraFee, type PricingRouteMetrics } from "../pricing/engine";
+import { getLongDistanceFee } from "./ride-settings";
 import { serializeVehicle } from "../serialize";
 import { ApiError } from "../api";
 import { activeUnitsBySlug, unitsAvailable } from "./fleet";
@@ -186,6 +187,8 @@ export async function buildQuote(
   opts: MetricsOptions = {},
   /** Partner markup for the person asking (0 for ordinary customers). */
   markupPercent = 0,
+  /** Ride deliveries carry the Super Admin's long-distance fee; a shipment pickup does not. */
+  includeLongDistance = true,
 ): Promise<QuoteDTO> {
   await connectToDatabase();
   const vehicles = await Vehicle.find({ active: true }).sort({ sortOrder: 1, name: 1 }).lean();
@@ -209,6 +212,7 @@ export async function buildQuote(
   };
 
   const inUseBySlug = await activeUnitsBySlug();
+  const longDistance = includeLongDistance ? await getLongDistanceFee() : null;
 
   return {
     distanceKm: metrics.distanceKm,
@@ -225,7 +229,7 @@ export async function buildQuote(
       const avail = unitsAvailable(v.fleetSize, inUseBySlug.get(v.slug) ?? 0);
       return {
         vehicle: serializeVehicle(v),
-        price: withoutMarkup(calculatePrice(
+        price: foldExtraFee(withoutMarkup(calculatePrice(
           {
             slug: v.slug,
             name: v.name,
@@ -235,7 +239,8 @@ export async function buildQuote(
           },
           { ...priceMetrics, estimatedDurationSeconds: scaled },
           markupPercent,
-        )),
+          { fee: longDistance },
+        ))),
         unitsAvailable: avail,
         soldOut: avail === 0,
       };

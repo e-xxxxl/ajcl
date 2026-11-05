@@ -30,7 +30,7 @@ type PopulatedUser = { _id: unknown; firstName: string; lastName: string; email:
 
 export function serializeBooking(
   b: Lean<BookingDoc> & { user?: PopulatedUser | unknown },
-  opts: { includeCustomer?: boolean; includePickupCode?: boolean } = {},
+  opts: { includeCustomer?: boolean; includePickupCode?: boolean; showExtraFee?: boolean } = {},
 ): BookingDTO {
   const loc = (l: BookingDoc["pickup"]) =>
     l
@@ -93,7 +93,10 @@ export function serializeBooking(
       estimatedDurationSeconds: b.pricing?.estimatedDurationSeconds ?? 0,
       pricePerKm: b.pricing?.pricePerKm ?? 0,
       basePrice: b.pricing?.basePrice ?? 0,
-      distanceCharge: b.pricing?.distanceCharge ?? 0,
+      // The Super Admin's long-distance fee shows as its own line to the Super Admin only. Everyone else gets it folded into the
+      // distance charge, so the lines still add up and nothing shows it.
+      distanceCharge: opts.showExtraFee ? b.pricing?.distanceCharge ?? 0 : Math.round(((b.pricing?.distanceCharge ?? 0) + (b.pricing?.extraFee ?? 0)) * 100) / 100,
+      ...(opts.showExtraFee && (b.pricing?.extraFee ?? 0) > 0 ? { extraFee: b.pricing?.extraFee } : {}),
       stopsFee: b.pricing?.stopsFee ?? 0,
       tax: b.pricing?.tax ?? 0,
       subtotal: b.pricing?.subtotal ?? 0,

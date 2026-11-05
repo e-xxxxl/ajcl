@@ -11,7 +11,7 @@ import { getShippingSettings } from "./shipping-settings";
 import { resolveLocation } from "./locations";
 import { publicCarrierName, publicText, publicTrackingUrl, publicHistoryNote } from "../public-text";
 import { billedWeightKg, needsManualQuote } from "./shipment-pricing";
-import { notifyCustomer, notifyOffice } from "./shipment-notify";
+import { notifyCustomer, notifyOffice, notifyParties } from "./shipment-notify";
 import { flowOf, type CreateShipmentInput } from "../validation/shipment";
 import type { ShipmentStatus } from "../../config/shipping";
 
@@ -297,6 +297,7 @@ export async function syncShipmentFromPickup(booking: BookingHydrated, to: strin
     setStatus(shipment, "cancelled", SYSTEM, "The pickup booking was cancelled");
     await shipment.save();
     await notifyCustomer(String(shipment.user), "shipment_failed", "Shipment cancelled", `Shipment ${shipment.reference} was cancelled.`, shipment.reference);
+    await notifyParties(shipment.reference, "cancelled");
   }
 }
 
@@ -350,6 +351,8 @@ export async function cancelShipment(shipment: ShipmentHydrated, actor: Actor, r
   shipment.cancelledReason = reason;
   setStatus(shipment, "cancelled", actor, reason);
   await shipment.save();
+  // The sender and receiver are told too, whoever cancelled it.
+  await notifyParties(shipment.reference, "cancelled", reason);
   if (actor.role !== "customer") {
     await notifyCustomer(String(shipment.user), "shipment_failed", "Shipment cancelled", `Shipment ${shipment.reference} was cancelled${reason ? `: ${reason}` : "."}`, shipment.reference);
   } else {

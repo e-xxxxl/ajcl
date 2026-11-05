@@ -168,6 +168,19 @@ export async function placeDetails(
 
 /* ──────────────────────────────── Routing ───────────────────────────────── */
 
+/**
+ * A road route, remembered for a few hours. The map service can answer the same question with a slightly different road
+ * each time (traffic-aware routing), and priced per km that is a few hundred naira between the price a customer was shown
+ * and the price charged. The same places, in the same order, always give the same distance.
+ */
+const ROUTE_TTL_MS = 6 * 60 * 60 * 1000;
+const routeCache = new Map<string, { at: number; value: NonNullable<Awaited<ReturnType<typeof computeRouteViaGoogle>>> }>();
+const routeKey = (points: LatLng[]) => points.map((p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`).join("|");
+
+export function clearRouteCache(): void {
+  routeCache.clear();
+}
+
 export async function computeRoute(
   points: LatLng[],
   opts: { returnToOrigin?: boolean } = {},
@@ -179,7 +192,16 @@ export async function computeRoute(
   }
 
   if (isConfigured()) {
-    const viaGoogle = await computeRouteViaGoogle(full);
+    const key = routeKey(full);
+    const hit = routeCache.get(key);
+    let viaGoogle = hit && Date.now() - hit.at < ROUTE_TTL_MS ? hit.value : null;
+    if (!viaGoogle) {
+      viaGoogle = await computeRouteViaGoogle(full);
+      if (viaGoogle) {
+        if (routeCache.size > 500) routeCache.clear();
+        routeCache.set(key, { at: Date.now(), value: viaGoogle });
+      }
+    }
     if (viaGoogle) {
       const returnLegKm = opts.returnToOrigin ? (viaGoogle.legKm.at(-1) ?? 0) : 0;
       return {

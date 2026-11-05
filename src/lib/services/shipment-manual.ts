@@ -122,6 +122,7 @@ export async function advanceDelivery(shipment: ShipmentHydrated, actor: Actor, 
     input.status === "delivered" ? "Your shipment was delivered" : "Your shipment is on its way",
     `Shipment ${shipment.reference} is now ${input.status === "delivered" ? "delivered" : "on its way"}.${input.note ? ` ${input.note}` : ""}`,
     shipment.reference,
+    { note: input.note },
   );
   return shipment;
 }
@@ -133,7 +134,7 @@ export async function postDeliveryUpdate(shipment: ShipmentHydrated, actor: Acto
   if (!["paid", "booked", "in_transit"].includes(status)) throw new ApiError("Updates can be posted once the shipment is paid and until it is delivered.", 409);
   shipment.statusHistory.push({ status, note, byRole: actor.role, byName: actor.name, at: new Date() });
   await shipment.save();
-  await notifyCustomer(String(shipment.user), "shipment_update", "Update on your shipment", `Shipment ${shipment.reference}: ${note}`, shipment.reference);
+  await notifyCustomer(String(shipment.user), "shipment_update", "Update on your shipment", `Shipment ${shipment.reference}: ${note}`, shipment.reference, { note });
   return shipment;
 }
 

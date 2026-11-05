@@ -11,7 +11,7 @@ import { initializeTransaction, type PaystackVerifyResult } from "../paystack";
 import { findOwnShipment, setStatus, SYSTEM, PREPAY_STATUSES } from "./shipments";
 import { bookWithTerminal } from "./shipment-terminal";
 import { notifyCustomer, notifyOffice } from "./shipment-notify";
-import { priceForBundle, type ReconcileOutcome } from "./payment";
+import { priceForBundle, assertAmountMatches, type ReconcileOutcome } from "./payment";
 
 /**
  * The carrier price of a shipment is its own Paystack transaction, separate from the pickup
@@ -24,6 +24,7 @@ export async function initializeShippingPayment(
   reference: string,
   rateId: string,
   includePickupFee = false,
+  expectedAmount?: number,
 ): Promise<{ authorizationUrl: string; reference: string; amount: number; shippingAmount: number; pickupFee: number }> {
   await connectToDatabase();
   const shipment = await findOwnShipment(userId, reference);
@@ -72,6 +73,7 @@ export async function initializeShippingPayment(
   const amountMinor = toMinorUnits(amount);
   const charged = amount + (pickup?.amount ?? 0);
   const chargedMinor = toMinorUnits(charged);
+  assertAmountMatches(expectedAmount, charged);
   const txReference = `${shipment.reference}-S-${Date.now().toString(36).toUpperCase()}`;
 
   const init = await initializeTransaction({
@@ -155,6 +157,11 @@ export async function reconcileShippingPayment(
   const expectedMinor = ledger.chargedMinor ?? ledger.amountMinor;
   const amountOk = verification.amountMinor >= expectedMinor;
   const success = verification.status === "success" && amountOk;
+  if (verification.status === "success" && verification.amountMinor > expectedMinor) {
+    // More was taken than the price. Our code never adds anything, so this is Paystack passing its own charge on to the customer
+    // (Paystack dashboard > Settings > Preferences: customers pay the transaction fee). Turn that off to charge exactly the price.
+    console.warn(`[payments] ${ledger.reference}: Paystack took ${verification.amountMinor / 100} but the price was ${expectedMinor / 100}. Is "customer pays the fee" switched on in the Paystack dashboard?`);
+  }
 
   ledger.status = success ? "success" : verification.status === "pending" ? "pending" : "failed";
   ledger.channel = verification.channel;
@@ -243,4 +250,86 @@ export async function reconcileShippingPayment(
     finalShipment = await bookWithTerminal(String(moved._id));
   }
   return { booking: null, shipment: finalShipment, paid: true, status: "paid" };
+}
+
+/**
+ * Super Admin: a payment really happened but the system never saw it (a bank transfer, or the card was charged and the
+ * gateway never reported back). It records the payment against the shipment and pushes it through the same path a
+ * real payment takes, so the shipment moves on exactly as it would have: a paid interstate shipment waits for a driver,
+ * a paid international shipment is booked with the carrier, a paid pickup fee sends the rider. The payment is kept in
+ * the ledger (provider "manual", with who recorded it and why), so it counts in revenue and can be audited.
+ */
+export async function markShipmentPaid(
+  shipment: ShipmentHydrated,
+  actor: { id?: string; name: string; role: "customer" | "admin" | "office_admin" | "system" | "carrier" },
+  input: { target: "shipping" | "pickup_fee"; rateId?: string; note: string },
+): Promise<ShipmentHydrated> {
+  await connectToDatabase();
+  const stamp = Date.now().toString(36).toUpperCase();
+  const paidAt = new Date().toISOString();
+  const gatewayResponse = `Marked as paid by ${actor.name}: ${input.note}`.slice(0, 300);
+  const raw = { manual: true, by: actor.name, note: input.note };
+
+  if (input.target === "pickup_fee") {
+    if (shipment.status !== "pickup_fee_pending" || !shipment.handover.pickupBooking) {
+      throw new ApiError("There is no unpaid pickup fee on this shipment.", 409);
+    }
+    const booking = await Booking.findById(shipment.handover.pickupBooking);
+    if (!booking || booking.payment?.status === "paid") throw new ApiError("The pickup fee is already paid.", 409);
+    const amount = booking.pricing.total;
+    const reference = `MANUAL-${shipment.reference}-P-${stamp}`;
+    await Payment.create({
+      booking: booking._id,
+      shipment: shipment._id,
+      purpose: "pickup_fee",
+      user: shipment.user,
+      provider: "manual",
+      reference,
+      amount,
+      amountMinor: toMinorUnits(amount),
+      currency: "NGN",
+      status: "initialized",
+    });
+    const { reconcilePayment } = await import("./payment");
+    await reconcilePayment({ status: "success", reference, amountMinor: toMinorUnits(amount), currency: "NGN", channel: "manual", paidAt, gatewayResponse, raw }, "callback");
+  } else {
+    // The same three situations as a real payment: a quote to pay, paying in advance (international), or the extra fee
+    // after weighing a shipment that was paid in advance.
+    const extraMode = shipment.prepaid && shipment.status === "quote_sent";
+    const advanceMode =
+      !shipment.shippingPaidAt && shipment.quote.prepayOffered && shipment.shipmentType === "international" && PREPAY_STATUSES.includes(shipment.status as never);
+    if (shipment.status !== "quote_sent" && !advanceMode) {
+      throw new ApiError(shipment.shippingPaidAt ? "This shipment has already been paid." : "There is no price to pay for this shipment yet.", 409);
+    }
+    const options = shipment.quote.options;
+    const wanted = extraMode ? shipment.quote.selectedRateId ?? input.rateId : input.rateId;
+    const option = wanted ? options.find((o) => o.rateId === wanted) : options.length === 1 ? options[0] : undefined;
+    if (!option) throw new ApiError(options.length === 0 ? "There is no price to pay for this shipment yet." : "Choose which option the customer paid for.", 422);
+    const payable = extraMode ? Math.round((option.total - (shipment.shippingAmount ?? 0)) * 100) / 100 : option.total;
+    if (!option.total || option.total <= 0 || payable <= 0) throw new ApiError("Nothing is due on this shipment.", 409);
+
+    shipment.quote.selectedRateId = option.rateId;
+    shipment.quote.selectedAt = new Date();
+    if (advanceMode) shipment.quote.prepaidCarrier = option.carrierName;
+    await shipment.save();
+
+    const reference = `MANUAL-${shipment.reference}-S-${stamp}`;
+    const ledger = await Payment.create({
+      shipment: shipment._id,
+      purpose: "shipping_total",
+      user: shipment.user,
+      provider: "manual",
+      reference,
+      amount: payable,
+      amountMinor: toMinorUnits(payable),
+      currency: "NGN",
+      status: "initialized",
+    });
+    await reconcileShippingPayment(ledger as never, { status: "success", reference, amountMinor: toMinorUnits(payable), currency: "NGN", channel: "manual", paidAt, gatewayResponse, raw }, "callback");
+  }
+
+  const fresh = (await Shipment.findById(shipment._id)) ?? shipment;
+  fresh.statusHistory.push({ status: fresh.status, note: gatewayResponse, byRole: actor.role, byName: actor.name, at: new Date() });
+  await fresh.save();
+  return fresh;
 }

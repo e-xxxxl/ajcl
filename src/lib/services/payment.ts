@@ -14,6 +14,7 @@ import { isClassSoldOut } from "./fleet";
 import { notify } from "../notifications";
 import { activateOrder } from "./activation";
 import { getPartnerMarkup, isActivePartner } from "./partner-pricing";
+import { getLongDistanceFee } from "./ride-settings";
 import {
   initializeTransaction,
   verifyTransaction,
@@ -25,22 +26,32 @@ import {
  * breakdown. This is the authoritative amount charged — the client total is
  * never trusted.
  */
-export async function repriceBooking(booking: BookingHydrated): Promise<BookingHydrated> {
+export async function repriceBooking(booking: BookingHydrated, opts: { reuseRoute?: boolean } = {}): Promise<BookingHydrated> {
   const vehicle = await Vehicle.findById(booking.vehicle?.vehicleId);
   if (!vehicle) throw new ApiError("The vehicle for this booking is no longer available.", 409);
 
   const rm = booking.routeMeta;
-  const metrics = await computeRouteMetrics(bookingToRouteInput(booking), {
-    stored:
-      rm && rm.distanceKm && rm.distanceKm > 0
-        ? {
-            distanceKm: rm.distanceKm,
-            returnLegKm: rm.returnLegKm ?? 0,
-            durationSeconds: rm.estimatedDurationSeconds ?? 0,
-            polyline: booking.routePolyline ?? undefined,
-          }
-        : undefined,
-  });
+  const stored =
+    rm && rm.distanceKm && rm.distanceKm > 0
+      ? {
+          distanceKm: rm.distanceKm,
+          returnLegKm: rm.returnLegKm ?? 0,
+          durationSeconds: rm.estimatedDurationSeconds ?? 0,
+          polyline: booking.routePolyline ?? undefined,
+        }
+      : undefined;
+  // At payment the route that was priced is kept: only the rates are checked again. Asking the map service a second time
+  // can return a slightly different road, and a different distance is a different price from the one the customer saw.
+  const metrics =
+    opts.reuseRoute && stored
+      ? {
+          distanceKm: stored.distanceKm,
+          returnLegKm: stored.returnLegKm,
+          estimatedDurationSeconds: stored.durationSeconds,
+          polyline: stored.polyline,
+          stopCount: bookingToRouteInput(booking).stops.length,
+        }
+      : await computeRouteMetrics(bookingToRouteInput(booking), { stored });
 
   if (metrics.distanceKm > 0) {
     const pricing = calculatePrice(
@@ -58,6 +69,12 @@ export async function repriceBooking(booking: BookingHydrated): Promise<BookingH
         estimatedDurationSeconds: metrics.estimatedDurationSeconds,
       },
       await getPartnerMarkup(String(booking.user)),
+      // The long-distance fee is for ride deliveries. A booking keeps the fee it was priced with; only a new route is priced afresh.
+      booking.kind === "shipment_pickup"
+        ? { fixedNgn: 0 }
+        : opts.reuseRoute && stored
+          ? { fixedNgn: booking.pricing?.extraFee ?? 0 }
+          : { fee: await getLongDistanceFee() },
     );
     booking.distanceKm = metrics.distanceKm;
     booking.estimatedDurationSeconds = metrics.estimatedDurationSeconds;
@@ -82,16 +99,34 @@ export async function priceForBundle(booking: BookingHydrated): Promise<number> 
       409,
     );
   }
-  await repriceBooking(booking);
+  await repriceBooking(booking, { reuseRoute: true });
   const amount = booking.pricing.total;
   if (!amount || amount <= 0) throw new ApiError("The pickup has no payable amount. Please contact support.", 422);
   return amount;
+}
+
+const naira = (n: number) => `₦${Math.round(n).toLocaleString("en-NG")}`;
+
+/**
+ * What the customer was shown must be what is charged. When the screen sends the amount it displayed and the amount to
+ * charge is different (the rates changed, or the page was old), nothing is charged: the customer is told the new amount
+ * and can check it and pay again. A caller that sends no amount is not checked.
+ */
+export function assertAmountMatches(expected: number | undefined, actual: number): void {
+  if (expected == null || !Number.isFinite(expected)) return;
+  if (Math.abs(expected - actual) < 0.5) return;
+  throw new ApiError(
+    `The price is now ${naira(actual)}, not ${naira(expected)} as shown. Nothing was charged. Please check it and pay again.`,
+    409,
+    { amount: [String(actual)], expectedAmount: [String(expected)] },
+  );
 }
 
 /** Start (or resume) checkout for a booking. Returns a Paystack authorization URL. */
 export async function initializeBookingPayment(
   userId: string,
   reference: string,
+  expectedAmount?: number,
 ): Promise<{ authorizationUrl: string; reference: string; amount: number }> {
   await connectToDatabase();
 
@@ -133,13 +168,14 @@ export async function initializeBookingPayment(
     );
   }
 
-  // Authoritative re-price before charging.
-  await repriceBooking(booking);
+  // Check the rates again before charging, on the route that was priced (see repriceBooking).
+  await repriceBooking(booking, { reuseRoute: true });
 
   const amount = booking.pricing.total;
   if (!amount || amount <= 0) {
     throw new ApiError("This booking has no payable amount. Please contact support.", 422);
   }
+  assertAmountMatches(expectedAmount, amount);
 
   const user = await User.findById(userId).lean();
   if (!user) throw new ApiError("Account not found.", 404);
@@ -241,6 +277,11 @@ export async function reconcilePayment(
   const expectedMinor = toMinorUnits(booking.pricing.total);
   const amountOk = verification.amountMinor >= expectedMinor;
   const success = verification.status === "success" && amountOk;
+  if (verification.status === "success" && verification.amountMinor > expectedMinor) {
+    // More was taken than the price. Our code never adds anything, so this is Paystack passing its own charge on to the customer
+    // (Paystack dashboard > Settings > Preferences: customers pay the transaction fee). Turn that off to charge exactly the price.
+    console.warn(`[payments] ${verification.reference}: Paystack took ${verification.amountMinor / 100} but the price was ${expectedMinor / 100}. Is "customer pays the fee" switched on in the Paystack dashboard?`);
+  }
 
   if (ledger) {
     ledger.status = success ? "success" : verification.status === "pending" ? "pending" : "failed";

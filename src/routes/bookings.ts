@@ -34,7 +34,8 @@ bookingsRouter.post(
 
     // Partners are quoted their own price (the admin's markup is applied; the percentage is never sent).
     const markup = standardRate ? 0 : await getPartnerMarkup(session.sub);
-    const quote = await buildQuote(input, { clientRoute }, markup);
+    // A shipment's rider pickup (standard rate) is not a ride delivery, so it carries no long-distance fee.
+    const quote = await buildQuote(input, { clientRoute }, markup, !standardRate);
     return ok(res, quote);
   }),
 );

@@ -74,6 +74,8 @@ export type PriceBreakdownDTO = {
   pricePerKm: number;
   basePrice: number;
   distanceCharge: number;
+  /** Super Admin only: the long-distance fee inside the total. Never present for anyone else. */
+  extraFee?: number;
   stopsFee: number;
   tax: number;
   subtotal: number;
