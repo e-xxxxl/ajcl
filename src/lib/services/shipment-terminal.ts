@@ -1082,11 +1082,13 @@ export async function estimateRates(input: {
   from?: { country: string; state: string; city: string; zip?: string };
   weightKg: number;
   dimensions?: { lengthCm: number; widthCm: number; heightCm: number };
+  /** Staff price check: also price a route inside one country (for example Nigeria to Nigeria), which the public quote does not. */
+  allowDomestic?: boolean;
 }) {
   const settings = await getShippingSettings();
   const billedKg = billedWeightKg(input.weightKg);
   // Interstate prices are set by the office after the parcel is weighed, so there is nothing to look up.
-  if (input.shipmentType === "interstate" || needsManualQuote(billedKg)) {
+  if ((input.shipmentType === "interstate" && !input.allowDomestic) || needsManualQuote(billedKg)) {
     return { manualRequired: true, billedWeightKg: billedKg, options: [], warnings: [], fxUpdatedAt: null as string | null };
   }
   const fx = exchangeRatesObject(settings);

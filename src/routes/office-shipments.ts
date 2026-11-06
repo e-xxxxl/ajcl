@@ -52,8 +52,11 @@ import {
   createShipmentByStaff,
   bookWithoutOnlinePayment,
   correctContactPhone,
+  estimateRates,
 } from "../lib/services/shipment-terminal";
 import { notifyCustomer } from "../lib/services/shipment-notify";
+import { resolveLocation } from "../lib/services/locations";
+import { enforceRateLimit } from "../lib/rate-limit";
 import { SHIPMENT_STATUSES, MAX_AUTO_QUOTE_KG, type ShipmentStatus } from "../config/shipping";
 import { isTerminalConfigured } from "../lib/env";
 
@@ -73,6 +76,64 @@ const listSchema = z.object({
   type: z.enum(["interstate", "international"]).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(100),
 });
+
+const priceCheckPlace = z.object({
+  country: z.string().trim().toUpperCase().length(2),
+  state: z.string().trim().min(2).max(100),
+  city: z.string().trim().min(2).max(100),
+  zip: z.string().trim().max(20).optional(),
+});
+const priceCheckSchema = z.object({
+  from: priceCheckPlace,
+  to: priceCheckPlace,
+  weightKg: z.coerce.number().min(0.1).max(1000),
+  dimensions: z
+    .object({
+      lengthCm: z.coerce.number().min(1).max(300),
+      widthCm: z.coerce.number().min(1).max(300),
+      heightCm: z.coerce.number().min(1).max(300),
+    })
+    .optional(),
+});
+
+/**
+ * POST /api/office/shipments/price-check: carrier prices for any route, for the shipments desk only (nothing is saved).
+ * Unlike the public quote it allows Nigeria as the destination and a route inside one country, so the desk can see what
+ * a carrier would charge for an interstate or any other shipment. Shows the full breakdown, as the shipment page does.
+ */
+officeShipmentsRouter.post(
+  "/price-check",
+  asyncHandler(async (req, res) => {
+    const session = requireOffice(req);
+    enforceRateLimit(req, `office-price-check:${session.sub}`, { limit: 120, windowMs: 60 * 60 * 1000 });
+    const input = parse(priceCheckSchema, req.body);
+    await connectToDatabase();
+    const from = await resolveLocation({ country: input.from.country, state: input.from.state, city: input.from.city }, "origin");
+    const to = await resolveLocation({ country: input.to.country, state: input.to.state, city: input.to.city }, "destination");
+    const domestic = from.country === to.country;
+    const result = await estimateRates({
+      // Inside one country the price is asked for in naira; across borders in the international quote currency.
+      shipmentType: domestic ? "interstate" : "international",
+      allowDomestic: true,
+      country: to.country,
+      state: to.state,
+      city: to.city,
+      zip: input.to.zip,
+      from: { country: from.country, state: from.state, city: from.city, zip: input.from.zip },
+      weightKg: input.weightKg,
+      dimensions: input.dimensions,
+    });
+    return ok(res, {
+      domestic,
+      from: { country: from.country, state: from.state, city: from.city },
+      to: { country: to.country, state: to.state, city: to.city },
+      manualRequired: result.manualRequired,
+      billedWeightKg: result.billedWeightKg,
+      fxUpdatedAt: result.fxUpdatedAt,
+      options: result.options,
+    });
+  }),
+);
 
 /** POST /api/office/shipments: create a shipment on the admin side, with no payment, saved in Terminal as a draft. */
 officeShipmentsRouter.post(
