@@ -249,10 +249,16 @@ export const dispatchSchema = z.object({
 });
 
 /** Interstate (hand-run): move the delivery along, with a note the customer can read. */
-export const deliveryStatusSchema = z.object({
-  status: z.enum(["in_transit", "delivered"]),
-  note: z.string().trim().max(500).optional(),
-});
+export const deliveryStatusSchema = z
+  .object({
+    status: z.enum(["in_transit", "delivery_attempted", "delivery_rejected", "delivered", "returned"]),
+    note: z.string().trim().max(500).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (["delivery_attempted", "delivery_rejected", "returned"].includes(v.status) && (v.note ?? "").length < 3) {
+      ctx.addIssue({ code: "custom", path: ["note"], message: "Say why. The customer is shown this." });
+    }
+  });
 
 /** Interstate (hand-run): a progress update for the customer with no change of status. */
 export const deliveryUpdateSchema = z.object({

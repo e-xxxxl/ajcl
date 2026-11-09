@@ -15,7 +15,10 @@ export const SHIPMENT_STATUSES = [
   "booked",
   "booking_failed",
   "in_transit",
+  "delivery_attempted",
+  "delivery_rejected",
   "delivered",
+  "returned",
   "cancelled",
   "failed",
 ] as const;
@@ -83,10 +86,25 @@ export const SHIPMENT_STATUS_META: Record<
     description: "Your shipment is on its way to the destination.",
     tone: "progress",
   },
+  delivery_attempted: {
+    label: "Delivery attempted",
+    description: "The driver tried to deliver your package but could not complete the delivery. We will be in touch to arrange another attempt.",
+    tone: "warning",
+  },
+  delivery_rejected: {
+    label: "Delivery rejected",
+    description: "The package was not accepted by the receiver. We will contact you about what happens next.",
+    tone: "danger",
+  },
   delivered: {
     label: "Delivered",
     description: "Your shipment has been delivered.",
     tone: "success",
+  },
+  returned: {
+    label: "Package returned",
+    description: "The package could not be delivered and has been returned to the sender.",
+    tone: "danger",
   },
   cancelled: { label: "Cancelled", description: "This shipment was cancelled.", tone: "danger" },
   failed: {
@@ -115,6 +133,20 @@ export function shipmentStatusMeta(status: ShipmentStatus, shipmentType?: string
   const hand = shipmentType === "interstate" ? SHIPMENT_STATUS_META_HAND_RUN[status] : undefined;
   return hand ? { ...base, ...hand } : base;
 }
+
+/**
+ * Where a shipment on its way can go next, when the office moves it by hand. A delivery that is attempted or rejected is not
+ * the end: it can go out again, or the package is returned to the sender.
+ */
+export const DELIVERY_MOVES: Partial<Record<ShipmentStatus, ShipmentStatus[]>> = {
+  booked: ["in_transit", "delivery_attempted", "delivery_rejected", "delivered"],
+  in_transit: ["delivery_attempted", "delivery_rejected", "delivered", "returned"],
+  delivery_attempted: ["in_transit", "delivery_rejected", "delivered", "returned"],
+  delivery_rejected: ["in_transit", "returned"],
+};
+
+/** Delivery problems: the customer is told why, so the office must say why. */
+export const DELIVERY_PROBLEM_STATUSES: ShipmentStatus[] = ["delivery_attempted", "delivery_rejected", "returned"];
 
 /** The happy path for each handover method, used to draw the timeline. */
 export const SHIPMENT_FLOW_PICKUP: ShipmentStatus[] = [

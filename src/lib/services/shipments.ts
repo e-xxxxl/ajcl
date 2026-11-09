@@ -44,7 +44,7 @@ export async function uniqueReference(): Promise<string> {
 }
 
 /** Once the carrier has the shipment, a phone number can no longer be changed here. */
-export const CONTACT_LOCKED: ShipmentStatus[] = ["booked", "in_transit", "delivered", "cancelled", "failed"];
+export const CONTACT_LOCKED: ShipmentStatus[] = ["booked", "in_transit", "delivery_attempted", "delivery_rejected", "delivered", "returned", "cancelled", "failed"];
 
 /** Record a status change in the shipment's history. Does not save. */
 export function setStatus(shipment: ShipmentHydrated, status: ShipmentStatus, actor: Actor, note?: string) {
@@ -584,7 +584,7 @@ export function serializeShipment(
 ): ShipmentDTO {
   const s = (typeof (doc as ShipmentHydrated).toObject === "function" ? (doc as ShipmentHydrated).toObject() : doc) as ShipmentDoc;
   const staff = Boolean(opts.staff);
-  const quoteVisibleToCustomer = ["quote_sent", "paid", "booked", "booking_failed", "in_transit", "delivered"].includes(s.status);
+  const quoteVisibleToCustomer = ["quote_sent", "paid", "booked", "booking_failed", "in_transit", "delivery_attempted", "delivery_rejected", "delivered", "returned"].includes(s.status);
   const prepayAvailable =
     s.shipmentType === "international" &&
     Boolean(s.quote?.prepayOffered) &&

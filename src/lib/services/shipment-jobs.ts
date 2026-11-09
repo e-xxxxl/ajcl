@@ -19,7 +19,7 @@ export async function runShipmentJobs(): Promise<void> {
 
     const stale = new Date(Date.now() - Math.max(60, env.terminal.pollIntervalSeconds) * 1000);
     const tracking = await Shipment.find({
-      status: { $in: ["booked", "in_transit"] },
+      status: { $in: ["booked", "in_transit", "delivery_attempted", "delivery_rejected"] },
       "terminal.shipmentId": { $exists: true },
       $or: [{ "terminal.lastSyncedAt": { $exists: false } }, { "terminal.lastSyncedAt": { $lt: stale } }],
     }).limit(40);

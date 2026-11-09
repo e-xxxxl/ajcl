@@ -35,6 +35,9 @@ const PARTY_EVENTS: Partial<Record<NotificationType, PartyEvent>> = {
   shipment_in_transit: "in_transit",
   shipment_update: "update",
   shipment_delivered: "delivered",
+  shipment_attempted: "attempted",
+  shipment_rejected: "rejected",
+  shipment_returned: "returned",
 };
 
 export async function notifyCustomer(
@@ -56,7 +59,7 @@ export async function notifyCustomer(
 
 /* ── The sender and the receiver ───────────────────────────────────────── */
 
-export type PartyEvent = "created" | "booked" | "in_transit" | "update" | "delivered" | "cancelled";
+export type PartyEvent = "created" | "booked" | "in_transit" | "update" | "delivered" | "cancelled" | "attempted" | "rejected" | "returned";
 
 type PartyShipment = {
   reference: string;
@@ -131,6 +134,24 @@ export function partyContent(role: "sender" | "receiver", event: PartyEvent, s: 
         subject: `The package was delivered (${ref})`,
         heading: receiver ? "Your package was delivered" : "The package was delivered",
         paragraphs: [`${package_} has been delivered.`, refLine, ...noteLine, `Thank you for choosing ${site.name}.`],
+      };
+    case "attempted":
+      return {
+        subject: `A delivery was attempted (${ref})`,
+        heading: "A delivery was attempted",
+        paragraphs: [`${package_} could not be delivered on this attempt.`, ...noteLine, refLine, ...driver, "We will arrange another attempt, or contact you."],
+      };
+    case "rejected":
+      return {
+        subject: `The delivery was rejected (${ref})`,
+        heading: "The delivery was rejected",
+        paragraphs: [`${package_} was not accepted.`, ...noteLine, refLine, "We will be in touch about what happens next."],
+      };
+    case "returned":
+      return {
+        subject: `The package was returned (${ref})`,
+        heading: receiver ? "The package was returned to the sender" : "Your package was returned",
+        paragraphs: [`${package_} could not be delivered and has been returned to the sender.`, ...noteLine, refLine],
       };
     case "cancelled":
       return {

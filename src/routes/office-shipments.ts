@@ -28,6 +28,7 @@ import {
   markPaidByHand,
   assignDriver,
   advanceDelivery,
+  moveDelivery,
   postDeliveryUpdate,
 } from "../lib/services/shipment-manual";
 import {
@@ -371,22 +372,13 @@ officeShipmentsRouter.post(
       await advanceDelivery(shipment, actorOf(session), input);
       return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
     }
-    const order: ShipmentStatus[] = ["booked", "in_transit", "delivered"];
-    if (!shipment.terminal.bookedAt || order.indexOf(shipment.status as ShipmentStatus) < 0 || order.indexOf(status) <= order.indexOf(shipment.status as ShipmentStatus)) {
-      throw new ApiError("That update does not follow from the shipment's current status.", 409);
-    }
+    // An international shipment booked by hand (no carrier tracking) is moved the same way.
+    if (!shipment.terminal.bookedAt) throw new ApiError("That update does not follow from the shipment's current status.", 409);
     if (shipment.terminal.shipmentId) {
       throw new ApiError("This shipment is tracked automatically by the carrier.", 409);
     }
-    setStatus(shipment, status, actorOf(session));
-    await shipment.save();
-    await notifyCustomer(
-      String(shipment.user),
-      status === "delivered" ? "shipment_delivered" : "shipment_in_transit",
-      status === "delivered" ? "Your shipment was delivered" : "Your shipment is on its way",
-      `Shipment ${shipment.reference} is now ${status === "delivered" ? "delivered" : "in transit"}.`,
-      shipment.reference,
-    );
+    await moveDelivery(shipment, actorOf(session), input);
+    void status;
     return ok(res, { shipment: await serializeOne(shipment, { staff: true }) });
   }),
 );

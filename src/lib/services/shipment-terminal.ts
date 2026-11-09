@@ -750,8 +750,11 @@ export function buildManualOption(amount: number, extra: { carrierName?: string;
 
 export function mapTerminalStatus(raw: string): ShipmentStatus | null {
   const s = raw.toLowerCase();
-  if (/deliver(ed)?$|^delivered/.test(s) && !/out_for|out-for|attempt/.test(s)) return "delivered";
-  if (/fail|return|exception|undeliver|lost|damag|reject/.test(s)) return "failed";
+  if (/deliver(ed)?$|^delivered/.test(s) && !/out_for|out-for|attempt|un-?deliver|not.?deliver/.test(s)) return "delivered";
+  if (/reject|refus/.test(s)) return "delivery_rejected";
+  if (/return/.test(s)) return "returned";
+  if (/attempt/.test(s)) return "delivery_attempted";
+  if (/fail|exception|undeliver|lost|damag/.test(s)) return "failed";
   if (/transit|picked|pick_up|pickup_complete|out_for|out-for|shipped|dispatch|collected|arriv|depart|customs|sorting|delivery_in_progress/.test(s)) return "in_transit";
   return null;
 }
@@ -792,13 +795,16 @@ export function applyTracking(shipment: ShipmentHydrated, info: TerminalShipment
   }
 
   const mapped = mapTerminalStatus(info.status) ?? latestMapped(info);
-  if (!mapped || !["booked", "in_transit", "failed"].includes(current)) return { statusChanged: null };
+  if (!mapped || !["booked", "in_transit", "failed", "delivery_attempted", "delivery_rejected"].includes(current)) return { statusChanged: null };
   if (mapped === current) return { statusChanged: null };
-  if (mapped === "failed") {
-    setStatus(shipment, "failed", { name: "Carrier", role: "carrier" }, `Carrier status: ${info.status}`);
-    return { statusChanged: "failed" };
+  // A delivery that was attempted or rejected, a return, or a failure: shown as it is reported.
+  if (["failed", "delivery_attempted", "delivery_rejected", "returned"].includes(mapped)) {
+    setStatus(shipment, mapped, { name: "Carrier", role: "carrier" }, `Carrier status: ${info.status}`);
+    return { statusChanged: mapped };
   }
-  if (ORDER.indexOf(mapped) > ORDER.indexOf(current)) {
+  // After an attempt or a rejection the carrier can send it out again.
+  const outAgain = mapped === "in_transit" && ["delivery_attempted", "delivery_rejected"].includes(current);
+  if (outAgain || ORDER.indexOf(mapped) > ORDER.indexOf(current)) {
     setStatus(shipment, mapped, { name: "Carrier", role: "carrier" }, `Carrier status: ${info.status}`);
     return { statusChanged: mapped };
   }
@@ -830,6 +836,11 @@ async function announceTracking(shipment: ShipmentHydrated, changed: ShipmentSta
     await notifyCustomer(uid, "shipment_in_transit", "Your shipment is on its way", `Shipment ${shipment.reference} is in transit${shipment.terminal.trackingNumber ? `. Tracking number: ${shipment.terminal.trackingNumber}` : ""}.`, shipment.reference);
   } else if (changed === "delivered") {
     await notifyCustomer(uid, "shipment_delivered", "Your shipment was delivered", `Shipment ${shipment.reference} has been delivered.`, shipment.reference);
+  } else if (changed === "delivery_attempted" || changed === "delivery_rejected" || changed === "returned") {
+    const line = changed === "delivery_attempted" ? "was attempted, but the carrier could not complete the delivery" : changed === "delivery_rejected" ? "was not accepted by the receiver" : "could not be delivered and is being returned to the sender";
+    const type = changed === "delivery_attempted" ? "shipment_attempted" : changed === "delivery_rejected" ? "shipment_rejected" : "shipment_returned";
+    await notifyCustomer(uid, type, changed === "delivery_attempted" ? "A delivery was attempted" : changed === "delivery_rejected" ? "The delivery was rejected" : "Your package was returned", `Shipment ${shipment.reference} ${line}.`, shipment.reference);
+    if (changed !== "delivery_attempted") await notifyOffice("shipment_failed", changed === "returned" ? "Package returned" : "Delivery rejected", `${shipment.reference}: ${shipment.terminal.status ?? ""}`, shipment.reference);
   } else if (changed === "failed") {
     await notifyCustomer(uid, "shipment_failed", "There is a problem with your shipment", `The carrier reported a problem with shipment ${shipment.reference}. Our team will contact you.`, shipment.reference);
     await notifyOffice("shipment_failed", "Carrier reported a problem", `${shipment.reference}: ${shipment.terminal.status ?? "delivery issue"}`, shipment.reference);

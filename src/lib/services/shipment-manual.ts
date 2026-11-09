@@ -1,10 +1,11 @@
 import { ApiError } from "../api";
 import type { ShipmentHydrated } from "../../models/Shipment";
-import type { ShipmentStatus } from "../../config/shipping";
+import { DELIVERY_MOVES, type ShipmentStatus } from "../../config/shipping";
 import { toInternationalPhone } from "../phone";
 import { setStatus, type Actor } from "./shipments";
 import { buildManualOption } from "./shipment-terminal";
 import { notifyCustomer, notifyOffice } from "./shipment-notify";
+import type { NotificationType } from "../../models/Notification";
 
 /**
  * Interstate shipments are run by hand: no carrier service is involved. The office sets the price, the customer pays,
@@ -81,7 +82,7 @@ export async function assignDriver(
 ): Promise<ShipmentHydrated> {
   requireHandRun(shipment, "Assigning a driver");
   const status = shipment.status as ShipmentStatus;
-  if (!["paid", "booked", "in_transit"].includes(status)) {
+  if (!["paid", "booked", "in_transit", "delivery_attempted", "delivery_rejected"].includes(status)) {
     throw new ApiError("A driver is assigned once the shipment is paid.", 409);
   }
   const first = !shipment.dispatch?.driverPhone;
@@ -106,32 +107,54 @@ export async function assignDriver(
   return shipment;
 }
 
-const ORDER: ShipmentStatus[] = ["booked", "in_transit", "delivered"];
+/** What the customer is told for each move. */
+const MOVE_NOTICE: Partial<Record<ShipmentStatus, { type: NotificationType; title: string; line: string }>> = {
+  in_transit: { type: "shipment_in_transit", title: "Your shipment is on its way", line: "is now on its way." },
+  delivered: { type: "shipment_delivered", title: "Your shipment was delivered", line: "was delivered." },
+  delivery_attempted: { type: "shipment_attempted", title: "A delivery was attempted", line: "was attempted, but the driver could not complete the delivery." },
+  delivery_rejected: { type: "shipment_rejected", title: "The delivery was rejected", line: "was not accepted by the receiver." },
+  returned: { type: "shipment_returned", title: "Your package was returned", line: "could not be delivered and has been returned to the sender." },
+};
 
-/** Move the delivery along: on the way, then delivered. The note is shown to the customer. */
-export async function advanceDelivery(shipment: ShipmentHydrated, actor: Actor, input: { status: "in_transit" | "delivered"; note?: string }): Promise<ShipmentHydrated> {
-  requireHandRun(shipment, "Updating the delivery this way");
-  const from = ORDER.indexOf(shipment.status as ShipmentStatus);
-  if (from < 0 || !shipment.dispatch?.driverPhone) throw new ApiError("Assign a driver first.", 409);
-  if (ORDER.indexOf(input.status) <= from) throw new ApiError("That update does not follow from the shipment's current status.", 409);
+/**
+ * Move a shipment that is being delivered by hand: on the way, a delivery attempted, a delivery rejected, delivered, or the
+ * package returned. The moves allowed from each status are DELIVERY_MOVES (the same list the admin page shows). The note
+ * is shown to the customer, and is required for a problem.
+ */
+export async function moveDelivery(shipment: ShipmentHydrated, actor: Actor, input: { status: ShipmentStatus; note?: string }): Promise<ShipmentHydrated> {
+  const allowed = DELIVERY_MOVES[shipment.status as ShipmentStatus] ?? [];
+  if (!allowed.includes(input.status)) throw new ApiError("That update does not follow from the shipment's current status.", 409);
+  const notice = MOVE_NOTICE[input.status];
+  if (!notice) throw new ApiError("That is not a delivery update.", 422);
   setStatus(shipment, input.status, actor, input.note);
   await shipment.save();
   await notifyCustomer(
     String(shipment.user),
-    input.status === "delivered" ? "shipment_delivered" : "shipment_in_transit",
-    input.status === "delivered" ? "Your shipment was delivered" : "Your shipment is on its way",
-    `Shipment ${shipment.reference} is now ${input.status === "delivered" ? "delivered" : "on its way"}.${input.note ? ` ${input.note}` : ""}`,
+    notice.type,
+    notice.title,
+    `Shipment ${shipment.reference} ${notice.line}${input.note ? ` ${input.note}` : ""}`,
     shipment.reference,
     { note: input.note },
   );
+  // A rejected delivery and a returned package need someone to follow up with the customer.
+  if (input.status === "delivery_rejected" || input.status === "returned") {
+    await notifyOffice("shipment_failed", input.status === "returned" ? "Package returned" : "Delivery rejected", `${shipment.reference}: ${input.note ?? ""}`, shipment.reference);
+  }
   return shipment;
+}
+
+/** Move the delivery along (interstate, run by hand). A driver must have been assigned first. */
+export async function advanceDelivery(shipment: ShipmentHydrated, actor: Actor, input: { status: ShipmentStatus; note?: string }): Promise<ShipmentHydrated> {
+  requireHandRun(shipment, "Updating the delivery this way");
+  if (!shipment.dispatch?.driverPhone || !(shipment.status in DELIVERY_MOVES)) throw new ApiError("Assign a driver first.", 409);
+  return moveDelivery(shipment, actor, input);
 }
 
 /** A progress note for the customer ("Passed Ore, arriving tomorrow") with no change of status. */
 export async function postDeliveryUpdate(shipment: ShipmentHydrated, actor: Actor, note: string): Promise<ShipmentHydrated> {
   requireHandRun(shipment, "Posting an update");
   const status = shipment.status as ShipmentStatus;
-  if (!["paid", "booked", "in_transit"].includes(status)) throw new ApiError("Updates can be posted once the shipment is paid and until it is delivered.", 409);
+  if (!["paid", "booked", "in_transit", "delivery_attempted", "delivery_rejected"].includes(status)) throw new ApiError("Updates can be posted once the shipment is paid and until it is delivered.", 409);
   shipment.statusHistory.push({ status, note, byRole: actor.role, byName: actor.name, at: new Date() });
   await shipment.save();
   await notifyCustomer(String(shipment.user), "shipment_update", "Update on your shipment", `Shipment ${shipment.reference}: ${note}`, shipment.reference, { note });
